@@ -1,0 +1,721 @@
+/**
+ * Intercambio navideño: el "servidor" de la página.
+ *
+ * Vive dentro de la Hoja de Google (Extensiones > Apps Script) y se publica
+ * como "Aplicación web". La página de GitHub le habla a esta URL para leer y
+ * guardar las opciones de regalo.
+ *
+ * Hojas que usa (las crea el menú "Intercambio > 1. Preparar las hojas"):
+ *   - Participantes: una fila por persona. Tú escribes Nombre y, si quieres,
+ *     Teléfono. Lo demás (ID, Clave, links) se llena solo.
+ *   - Deseos: una fila por cada opción de regalo. La llena la página.
+ *   - Configuración: título, fecha (opcional) y el link de la página.
+ *
+ * Seguridad: cada persona entra con su clave (va dentro de su link personal).
+ * Sin clave válida no se puede ver nada, y cada quien solo puede cambiar sus
+ * propias opciones. El sorteo no se guarda aquí: todos ven todas las listas,
+ * así nadie se entera de a quién le regala cada quien.
+ */
+
+var HOJA_PARTICIPANTES = 'Participantes';
+var HOJA_DESEOS = 'Deseos';
+var HOJA_CONFIG = 'Configuración';
+
+var MAX_DESEOS_POR_PERSONA = 12;
+var MAX_TEXTO = 1500;
+var MAX_LINK = 2000;
+var MAX_FOTO_BYTES = 6 * 1024 * 1024;
+
+// Encabezados de cada hoja. Se buscan por nombre (sin importar acentos ni
+// mayúsculas), así que el organizador puede mover las columnas de lugar.
+var COLUMNAS_PARTICIPANTES = [
+  { clave: 'id', titulo: 'ID' },
+  { clave: 'nombre', titulo: 'Nombre' },
+  { clave: 'telefono', titulo: 'Teléfono (opcional)' },
+  { clave: 'clave', titulo: 'Clave' },
+  { clave: 'link', titulo: 'Link personal' },
+  { clave: 'whatsapp', titulo: 'Mandar por WhatsApp' }
+];
+
+var COLUMNAS_DESEOS = [
+  { clave: 'id', titulo: 'ID' },
+  { clave: 'participante', titulo: 'Participante' },
+  { clave: 'nombre', titulo: 'Nombre' },
+  { clave: 'descripcion', titulo: 'Descripción' },
+  { clave: 'link', titulo: 'Link' },
+  { clave: 'foto', titulo: 'Foto' },
+  { clave: 'orden', titulo: 'Orden' },
+  { clave: 'actualizado', titulo: 'Actualizado' }
+];
+
+var CONFIG_INICIAL = [
+  ['Título', 'Intercambio Navideño 2026'],
+  ['Fecha del intercambio', ''],
+  ['Mensaje para todos', ''],
+  ['Quién ayuda', ''],
+  ['Link de la página', 'https://TU-USUARIO.github.io/intercambio/']
+];
+
+/* ------------------------------------------------------------------ */
+/* Entradas de la aplicación web                                       */
+/* ------------------------------------------------------------------ */
+
+function doGet(e) {
+  return responder_(function () {
+    var p = (e && e.parameter) || {};
+    var accion = p.accion || '';
+    if (!accion) {
+      return { ok: true, mensaje: 'El intercambio está funcionando.' };
+    }
+    var yo = identificar_(p.clave);
+    if (accion === 'datos') return accionDatos_(yo);
+    if (accion === 'foto') return accionFoto_(yo, p.id);
+    throw new ErrorUsuario_('Acción desconocida.');
+  });
+}
+
+function doPost(e) {
+  return responder_(function () {
+    var cuerpo;
+    try {
+      cuerpo = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    } catch (err) {
+      throw new ErrorUsuario_('No se entendió la petición.');
+    }
+    var yo = identificar_(cuerpo.clave);
+    if (cuerpo.accion === 'guardar') return accionGuardar_(yo, cuerpo);
+    if (cuerpo.accion === 'borrar') return accionBorrar_(yo, cuerpo);
+    throw new ErrorUsuario_('Acción desconocida.');
+  });
+}
+
+function responder_(fn) {
+  var resultado;
+  try {
+    resultado = fn();
+  } catch (err) {
+    if (err && err.esDeUsuario) {
+      resultado = { ok: false, error: err.message, codigo: err.codigo || '' };
+    } else {
+      console.error(err && err.stack ? err.stack : err);
+      resultado = { ok: false, error: 'Algo salió mal del lado de la hoja. Intenta otra vez en un momento.' };
+    }
+  }
+  return ContentService.createTextOutput(JSON.stringify(resultado))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function ErrorUsuario_(mensaje, codigo) {
+  // Se devuelve un Error real para que, si sale en el menú de la hoja, se lea bien.
+  var err = new Error(mensaje);
+  err.codigo = codigo;
+  err.esDeUsuario = true;
+  return err;
+}
+
+/* ------------------------------------------------------------------ */
+/* Acciones                                                            */
+/* ------------------------------------------------------------------ */
+
+function identificar_(clave) {
+  clave = String(clave || '').trim();
+  if (!clave) throw new ErrorUsuario_('Falta tu link personal.', 'sin-clave');
+  var participantes = leerParticipantes_();
+  for (var i = 0; i < participantes.length; i++) {
+    var p = participantes[i];
+    if (p.clave && p.id && p.clave === clave) return p;
+  }
+  throw new ErrorUsuario_('Ese link ya no es válido. Pídele uno nuevo a quien organiza.', 'clave-invalida');
+}
+
+function accionDatos_(yo) {
+  var config = leerConfig_();
+  var participantes = leerParticipantes_().filter(function (p) { return p.id; });
+  var deseos = leerDeseos_();
+
+  var personas = participantes.map(function (p) {
+    var suyos = deseos
+      .filter(function (d) { return d.participante === p.id; })
+      .sort(function (a, b) { return a.orden - b.orden; })
+      .map(deseoPublico_);
+    return { id: p.id, nombre: p.nombre, deseos: suyos };
+  });
+
+  return {
+    ok: true,
+    config: {
+      titulo: config.titulo,
+      fecha: config.fecha,
+      mensaje: config.mensaje,
+      ayuda: config.ayuda
+    },
+    yo: { id: yo.id, nombre: yo.nombre },
+    personas: personas
+  };
+}
+
+function accionFoto_(yo, fotoId) {
+  fotoId = String(fotoId || '').trim();
+  if (!fotoId) throw new ErrorUsuario_('Falta la foto.');
+  // Solo se sirven fotos que pertenecen a una opción de regalo. Así nadie
+  // puede usar esta URL para leer otros archivos del Drive del organizador.
+  var existe = leerDeseos_().some(function (d) { return d.foto === fotoId; });
+  if (!existe) throw new ErrorUsuario_('No se encontró la foto.');
+  var blob = DriveApp.getFileById(fotoId).getBlob();
+  return {
+    ok: true,
+    tipo: blob.getContentType(),
+    datos: Utilities.base64Encode(blob.getBytes())
+  };
+}
+
+function accionGuardar_(yo, cuerpo) {
+  var d = cuerpo.deseo || {};
+  var descripcion = limpiarTexto_(d.descripcion, MAX_TEXTO);
+  if (!descripcion) throw new ErrorUsuario_('Escribe qué te gustaría recibir.');
+  var link = normalizarLink_(d.link);
+  var idDeseo = String(d.id || '').trim();
+
+  // Revisión previa (sin candado) para no subir una foto si de todos modos
+  // no se va a poder guardar.
+  var previos = leerDeseos_();
+  var anterior = idDeseo ? buscarDeseo_(previos, idDeseo) : null;
+  if (idDeseo && (!anterior || anterior.participante !== yo.id)) {
+    throw new ErrorUsuario_('No se encontró esa opción. Puede que ya la hayas borrado.');
+  }
+  if (!idDeseo && contarDe_(previos, yo.id) >= MAX_DESEOS_POR_PERSONA) {
+    throw new ErrorUsuario_('Ya tienes ' + MAX_DESEOS_POR_PERSONA + ' opciones. Borra alguna para agregar otra.');
+  }
+
+  var fotoNueva = '';
+  if (cuerpo.foto && cuerpo.foto.datos) fotoNueva = guardarFoto_(cuerpo.foto, yo);
+
+  var fotoParaBorrar = '';
+  var guardado;
+  var candado = esperarCandado_(fotoNueva);
+  try {
+    var hoja = obtenerHoja_(HOJA_DESEOS);
+    var tabla = leerTabla_(hoja, COLUMNAS_DESEOS);
+    var deseos = filasADeseos_(tabla);
+    var ahora = new Date();
+
+    if (idDeseo) {
+      var actual = buscarDeseo_(deseos, idDeseo);
+      if (!actual || actual.participante !== yo.id) {
+        if (fotoNueva) fotoParaBorrar = fotoNueva;
+        throw new ErrorUsuario_('No se encontró esa opción. Puede que ya la hayas borrado.');
+      }
+      var foto = actual.foto;
+      if (fotoNueva) {
+        if (foto) fotoParaBorrar = foto;
+        foto = fotoNueva;
+      } else if (cuerpo.quitarFoto && foto) {
+        fotoParaBorrar = foto;
+        foto = '';
+      }
+      var fila = tabla.filas[actual.indice].slice();
+      ponerEnFila_(fila, tabla.indices, {
+        nombre: yo.nombre,
+        descripcion: descripcion,
+        link: link,
+        foto: foto,
+        actualizado: ahora
+      });
+      hoja.getRange(actual.fila, 1, 1, fila.length).setValues([fila]);
+      guardado = { id: actual.id, descripcion: descripcion, link: link, foto: foto, orden: actual.orden, actualizado: ahora };
+    } else {
+      if (contarDe_(deseos, yo.id) >= MAX_DESEOS_POR_PERSONA) {
+        if (fotoNueva) fotoParaBorrar = fotoNueva;
+        throw new ErrorUsuario_('Ya tienes ' + MAX_DESEOS_POR_PERSONA + ' opciones. Borra alguna para agregar otra.');
+      }
+      var orden = 1;
+      deseos.forEach(function (x) {
+        if (x.participante === yo.id && x.orden >= orden) orden = x.orden + 1;
+      });
+      var nuevo = {
+        id: nuevoId_('d', deseos.map(function (x) { return x.id; })),
+        participante: yo.id,
+        nombre: yo.nombre,
+        descripcion: descripcion,
+        link: link,
+        foto: fotoNueva,
+        orden: orden,
+        actualizado: ahora
+      };
+      var filaNueva = [];
+      for (var i = 0; i < tabla.ancho; i++) filaNueva.push('');
+      ponerEnFila_(filaNueva, tabla.indices, nuevo);
+      hoja.appendRow(filaNueva);
+      guardado = nuevo;
+    }
+  } finally {
+    candado.releaseLock();
+    if (fotoParaBorrar) borrarFoto_(fotoParaBorrar);
+  }
+
+  return { ok: true, deseo: deseoPublico_(guardado) };
+}
+
+function accionBorrar_(yo, cuerpo) {
+  var idDeseo = String(cuerpo.id || '').trim();
+  if (!idDeseo) throw new ErrorUsuario_('Falta indicar qué opción borrar.');
+  var foto = '';
+  var candado = esperarCandado_('');
+  try {
+    var hoja = obtenerHoja_(HOJA_DESEOS);
+    var deseos = filasADeseos_(leerTabla_(hoja, COLUMNAS_DESEOS));
+    var actual = buscarDeseo_(deseos, idDeseo);
+    if (!actual) return { ok: true };
+    if (actual.participante !== yo.id) throw new ErrorUsuario_('Esa opción no es tuya.');
+    foto = actual.foto;
+    hoja.deleteRow(actual.fila);
+  } finally {
+    candado.releaseLock();
+  }
+  if (foto) borrarFoto_(foto);
+  return { ok: true };
+}
+
+/** Evita que dos personas escriban en la hoja exactamente al mismo tiempo. */
+function esperarCandado_(fotoSubida) {
+  var candado = LockService.getScriptLock();
+  try {
+    candado.waitLock(20000);
+  } catch (err) {
+    if (fotoSubida) borrarFoto_(fotoSubida);
+    throw new ErrorUsuario_('Hay mucha gente guardando al mismo tiempo. Espera unos segundos e intenta otra vez.');
+  }
+  return candado;
+}
+
+/* ------------------------------------------------------------------ */
+/* Lectura de las hojas                                                */
+/* ------------------------------------------------------------------ */
+
+function obtenerHoja_(nombre) {
+  var hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(nombre);
+  if (!hoja) {
+    throw new ErrorUsuario_('Falta la hoja "' + nombre + '". Usa el menú Intercambio > 1. Preparar las hojas.');
+  }
+  return hoja;
+}
+
+/**
+ * Lee una hoja completa y ubica cada columna por su encabezado.
+ * Devuelve { indices: {clave: número de columna base 0}, filas: [...], ancho }.
+ */
+function leerTabla_(hoja, columnas) {
+  var valores = hoja.getDataRange().getValues();
+  var encabezados = (valores[0] || []).map(normalizar_);
+  var indices = {};
+  columnas.forEach(function (c) {
+    var buscado = normalizar_(c.titulo);
+    var corto = buscado.replace(/\s*\(.*\)$/, '');
+    var i = encabezados.indexOf(buscado);
+    if (i < 0) {
+      for (var j = 0; j < encabezados.length; j++) {
+        if (encabezados[j] && encabezados[j].indexOf(corto) === 0) { i = j; break; }
+      }
+    }
+    indices[c.clave] = i;
+  });
+  return { indices: indices, filas: valores.slice(1), ancho: Math.max(encabezados.length, 1) };
+}
+
+function celda_(fila, indice) {
+  if (indice < 0 || indice >= fila.length) return '';
+  var v = fila[indice];
+  if (v === null || v === undefined) return '';
+  if (esFecha_(v)) return v;
+  return leerTextoSeguro_(String(v).trim());
+}
+
+function leerParticipantes_() {
+  var tabla = leerTabla_(obtenerHoja_(HOJA_PARTICIPANTES), COLUMNAS_PARTICIPANTES);
+  var ix = tabla.indices;
+  var lista = [];
+  tabla.filas.forEach(function (f, i) {
+    var nombre = celda_(f, ix.nombre);
+    if (!nombre) return;
+    lista.push({
+      fila: i + 2,
+      id: celda_(f, ix.id),
+      nombre: nombre,
+      clave: celda_(f, ix.clave)
+    });
+  });
+  return lista;
+}
+
+function leerDeseos_() {
+  return filasADeseos_(leerTabla_(obtenerHoja_(HOJA_DESEOS), COLUMNAS_DESEOS));
+}
+
+function filasADeseos_(tabla) {
+  var ix = tabla.indices;
+  var lista = [];
+  tabla.filas.forEach(function (f, i) {
+    var id = celda_(f, ix.id);
+    var participante = celda_(f, ix.participante);
+    if (!id || !participante) return;
+    var orden = Number(celda_(f, ix.orden));
+    lista.push({
+      indice: i,
+      fila: i + 2,
+      id: String(id),
+      participante: String(participante),
+      descripcion: String(celda_(f, ix.descripcion)),
+      link: String(celda_(f, ix.link)),
+      foto: String(celda_(f, ix.foto)),
+      orden: isFinite(orden) && orden > 0 ? orden : i + 1,
+      actualizado: celda_(f, ix.actualizado)
+    });
+  });
+  return lista;
+}
+
+function leerConfig_() {
+  var datos = {};
+  var hoja = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJA_CONFIG);
+  if (hoja) {
+    hoja.getDataRange().getValues().forEach(function (f) {
+      var k = normalizar_(f[0]);
+      if (k) datos[k] = esFecha_(f[1]) ? f[1] : String(f[1] === null || f[1] === undefined ? '' : f[1]).trim();
+    });
+  }
+  return {
+    titulo: datos['titulo'] || 'Intercambio Navideño',
+    fecha: textoDeFecha_(datos['fecha del intercambio']),
+    mensaje: datos['mensaje para todos'] || '',
+    ayuda: datos['quien ayuda'] || '',
+    linkPagina: datos['link de la pagina'] || ''
+  };
+}
+
+function textoDeFecha_(v) {
+  if (!esFecha_(v)) return v || '';
+  var meses = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio',
+    'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  return v.getDate() + ' de ' + meses[v.getMonth()];
+}
+
+/* ------------------------------------------------------------------ */
+/* Fotos (se guardan en una carpeta de Drive del organizador)          */
+/* ------------------------------------------------------------------ */
+
+function guardarFoto_(foto, yo) {
+  var tipo = /^image\/(jpeg|png|webp|gif)$/.test(foto.tipo) ? foto.tipo : 'image/jpeg';
+  var bytes;
+  try {
+    bytes = Utilities.base64Decode(String(foto.datos));
+  } catch (err) {
+    throw new ErrorUsuario_('No se pudo leer la foto. Intenta con otra.');
+  }
+  if (bytes.length > MAX_FOTO_BYTES) throw new ErrorUsuario_('La foto es muy grande. Intenta con otra.');
+  var extension = tipo.split('/')[1].replace('jpeg', 'jpg');
+  var nombre = yo.nombre + ' - ' + Utilities.formatDate(new Date(), 'GMT', 'yyyyMMdd-HHmmss') + '.' + extension;
+  return carpetaFotos_().createFile(Utilities.newBlob(bytes, tipo, nombre)).getId();
+}
+
+function borrarFoto_(id) {
+  try {
+    DriveApp.getFileById(id).setTrashed(true);
+  } catch (err) {
+    console.warn('No se pudo borrar la foto ' + id + ': ' + err);
+  }
+}
+
+function carpetaFotos_() {
+  var props = PropertiesService.getScriptProperties();
+  var id = props.getProperty('CARPETA_FOTOS');
+  if (id) {
+    try {
+      var existente = DriveApp.getFolderById(id);
+      if (!existente.isTrashed()) return existente;
+    } catch (err) {
+      // la carpeta se borró: se crea otra abajo
+    }
+  }
+  var padre;
+  try {
+    padre = DriveApp.getFileById(SpreadsheetApp.getActiveSpreadsheet().getId()).getParents().next();
+  } catch (err) {
+    padre = DriveApp.getRootFolder();
+  }
+  var carpeta = padre.createFolder('Intercambio - fotos');
+  props.setProperty('CARPETA_FOTOS', carpeta.getId());
+  return carpeta;
+}
+
+/* ------------------------------------------------------------------ */
+/* Menú para el organizador                                            */
+/* ------------------------------------------------------------------ */
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Intercambio')
+    .addItem('1. Preparar las hojas', 'prepararHojas')
+    .addItem('2. Generar links personales', 'generarLinks')
+    .addToUi();
+}
+
+/** Al escribir un nombre nuevo en Participantes, se le asigna su clave y su link. */
+function onEdit(e) {
+  try {
+    if (!e || !e.range) return;
+    var hoja = e.range.getSheet();
+    if (hoja.getName() !== HOJA_PARTICIPANTES || e.range.getRow() < 2) return;
+    completarParticipantes_();
+  } catch (err) {
+    console.warn(err);
+  }
+}
+
+function prepararHojas() {
+  var libro = SpreadsheetApp.getActiveSpreadsheet();
+
+  var participantes = libro.getSheetByName(HOJA_PARTICIPANTES);
+  if (!participantes) {
+    // Si la hoja de cálculo es nueva, se reutiliza la primera hoja vacía.
+    var primera = libro.getSheets()[0];
+    if (libro.getSheets().length === 1 && primera.getLastRow() === 0) {
+      participantes = primera.setName(HOJA_PARTICIPANTES);
+    } else {
+      participantes = libro.insertSheet(HOJA_PARTICIPANTES);
+    }
+  }
+  asegurarEncabezados_(participantes, COLUMNAS_PARTICIPANTES);
+  var ixP = leerTabla_(participantes, COLUMNAS_PARTICIPANTES).indices;
+  participantes.setColumnWidth(ixP.id + 1, 70);
+  participantes.setColumnWidth(ixP.nombre + 1, 180);
+  participantes.setColumnWidth(ixP.telefono + 1, 150);
+  participantes.setColumnWidth(ixP.clave + 1, 120);
+  participantes.setColumnWidth(ixP.link + 1, 320);
+  participantes.setColumnWidth(ixP.whatsapp + 1, 180);
+  var filasP = participantes.getMaxRows() - 1;
+  participantes.getRange(2, ixP.nombre + 1, filasP, 1).setNumberFormat('@');
+  participantes.getRange(2, ixP.telefono + 1, filasP, 1).setNumberFormat('@');
+
+  var deseos = libro.getSheetByName(HOJA_DESEOS) || libro.insertSheet(HOJA_DESEOS);
+  asegurarEncabezados_(deseos, COLUMNAS_DESEOS);
+  var ixD = leerTabla_(deseos, COLUMNAS_DESEOS).indices;
+  deseos.setColumnWidth(ixD.descripcion + 1, 360);
+  deseos.setColumnWidth(ixD.link + 1, 260);
+  var filasD = deseos.getMaxRows() - 1;
+  deseos.getRange(2, ixD.descripcion + 1, filasD, 1).setNumberFormat('@').setWrap(true);
+  deseos.getRange(2, ixD.link + 1, filasD, 1).setNumberFormat('@');
+
+  var config = libro.getSheetByName(HOJA_CONFIG);
+  if (!config) {
+    config = libro.insertSheet(HOJA_CONFIG);
+    config.getRange(1, 2, CONFIG_INICIAL.length, 1).setNumberFormat('@');
+    config.getRange(1, 1, CONFIG_INICIAL.length, 2).setValues(CONFIG_INICIAL);
+    config.getRange(1, 1, CONFIG_INICIAL.length, 1).setFontWeight('bold');
+    config.setColumnWidth(1, 220);
+    config.setColumnWidth(2, 380);
+  }
+
+  libro.setActiveSheet(participantes);
+  SpreadsheetApp.getUi().alert(
+    'Listo',
+    'Ya están las hojas.\n\n' +
+    '1) En "Participantes" escribe el nombre de cada persona (columna Nombre).\n' +
+    '2) En "Configuración" pon el link de tu página de GitHub.\n' +
+    '3) Usa Intercambio > 2. Generar links personales.',
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+function generarLinks() {
+  var resumen = completarParticipantes_();
+  var ui = SpreadsheetApp.getUi();
+  if (!resumen.linkListo) {
+    ui.alert('Falta el link de la página',
+      'Ya se generaron las claves, pero en la hoja "Configuración" falta poner el link de tu página de GitHub ' +
+      '(algo como https://tu-usuario.github.io/intercambio/). Ponlo y vuelve a usar este menú.',
+      ui.ButtonSet.OK);
+    return;
+  }
+  ui.alert('Links listos',
+    'Se generaron ' + resumen.total + ' links personales.\n\n' +
+    'En la columna "Mandar por WhatsApp" toca el enlace de cada persona: se abre WhatsApp con el mensaje ya escrito. ' +
+    'Si pusiste su teléfono, se abre directo su chat; si no, eliges el contacto.',
+    ui.ButtonSet.OK);
+}
+
+/** Asigna ID y clave a quien no tenga, y arma su link personal y su mensaje de WhatsApp. */
+function completarParticipantes_() {
+  var hoja = obtenerHoja_(HOJA_PARTICIPANTES);
+  var tabla = leerTabla_(hoja, COLUMNAS_PARTICIPANTES);
+  var ix = tabla.indices;
+  if (ix.nombre < 0 || ix.id < 0 || ix.clave < 0) {
+    throw new ErrorUsuario_('A la hoja Participantes le faltan columnas. Usa Intercambio > 1. Preparar las hojas.');
+  }
+  var config = leerConfig_();
+  var base = String(config.linkPagina || '').trim();
+  var linkListo = /^https?:\/\//i.test(base) && base.indexOf('TU-USUARIO') < 0;
+  if (linkListo && !/\/$/.test(base) && !/\.html?$/i.test(base)) base += '/';
+
+  var idsUsados = [];
+  var clavesUsadas = [];
+  tabla.filas.forEach(function (f) {
+    if (celda_(f, ix.id)) idsUsados.push(String(celda_(f, ix.id)));
+    if (celda_(f, ix.clave)) clavesUsadas.push(String(celda_(f, ix.clave)));
+  });
+
+  var n = tabla.filas.length;
+  if (n === 0) return { total: 0, linkListo: linkListo };
+  var colId = [], colClave = [], colLink = [], colWa = [];
+  var total = 0;
+
+  tabla.filas.forEach(function (f) {
+    var nombre = celda_(f, ix.nombre);
+    var id = celda_(f, ix.id);
+    var clave = celda_(f, ix.clave);
+    var link = '';
+    var wa = SpreadsheetApp.newRichTextValue().setText('').build();
+    if (nombre) {
+      total++;
+      if (!id) { id = nuevoId_('p', idsUsados); idsUsados.push(id); }
+      if (!clave) { clave = nuevaClave_(clavesUsadas); clavesUsadas.push(clave); }
+      if (linkListo) {
+        link = base + '?c=' + encodeURIComponent(clave);
+        var tel = String(celda_(f, ix.telefono)).replace(/\D/g, '');
+        var mensaje =
+          'Hola ' + primerNombre_(nombre) + '. Este es tu link personal para el ' + config.titulo + ':\n\n' +
+          link + '\n\n' +
+          'Ahí puedes escribir lo que te gustaría recibir y ver lo que pidió la persona a la que le vas a regalar. ' +
+          'Es solo para ti, no lo compartas.';
+        wa = SpreadsheetApp.newRichTextValue()
+          .setText('Enviar a ' + nombre)
+          .setLinkUrl('https://wa.me/' + tel + '?text=' + encodeURIComponent(mensaje))
+          .build();
+      } else {
+        link = 'Falta el link de la página en Configuración';
+      }
+    }
+    colId.push([id]);
+    colClave.push([clave]);
+    colLink.push([link]);
+    colWa.push([wa]);
+  });
+
+  hoja.getRange(2, ix.id + 1, n, 1).setValues(colId);
+  hoja.getRange(2, ix.clave + 1, n, 1).setValues(colClave);
+  if (ix.link >= 0) hoja.getRange(2, ix.link + 1, n, 1).setValues(colLink);
+  if (ix.whatsapp >= 0) hoja.getRange(2, ix.whatsapp + 1, n, 1).setRichTextValues(colWa);
+  return { total: total, linkListo: linkListo };
+}
+
+function asegurarEncabezados_(hoja, columnas) {
+  var ultima = Math.max(hoja.getLastColumn(), 1);
+  var actuales = hoja.getRange(1, 1, 1, ultima).getValues()[0].map(normalizar_);
+  var faltantes = columnas.filter(function (c) {
+    var buscado = normalizar_(c.titulo).replace(/\s*\(.*\)$/, '');
+    return !actuales.some(function (a) { return a && a.indexOf(buscado) === 0; });
+  });
+  if (faltantes.length) {
+    var inicio = actuales.filter(function (a) { return a; }).length + 1;
+    hoja.getRange(1, inicio, 1, faltantes.length).setValues([faltantes.map(function (c) { return c.titulo; })]);
+  }
+  hoja.getRange(1, 1, 1, hoja.getLastColumn()).setFontWeight('bold').setBackground('#e8efe9');
+  hoja.setFrozenRows(1);
+}
+
+/* ------------------------------------------------------------------ */
+/* Utilidades                                                          */
+/* ------------------------------------------------------------------ */
+
+function deseoPublico_(d) {
+  return {
+    id: d.id,
+    descripcion: d.descripcion,
+    link: d.link,
+    foto: d.foto || '',
+    orden: d.orden,
+    actualizado: esFecha_(d.actualizado) ? d.actualizado.toISOString() : String(d.actualizado || '')
+  };
+}
+
+function ponerEnFila_(fila, indices, valores) {
+  Object.keys(valores).forEach(function (k) {
+    var i = indices[k];
+    if (i === undefined || i < 0) return;
+    var v = valores[k];
+    fila[i] = typeof v === 'string' ? escribirTextoSeguro_(v) : v;
+  });
+}
+
+/**
+ * Un texto que empieza con = + - @ la hoja lo trataría como fórmula
+ * (por ejemplo "- bufanda gris" daría #ERROR!). Se guarda con un apóstrofo
+ * al inicio, que la hoja oculta.
+ */
+function escribirTextoSeguro_(texto) {
+  return /^[=+\-@]/.test(texto) ? "'" + texto : texto;
+}
+
+function leerTextoSeguro_(texto) {
+  return /^'[=+\-@]/.test(texto) ? texto.slice(1) : texto;
+}
+
+function buscarDeseo_(lista, id) {
+  for (var i = 0; i < lista.length; i++) if (lista[i].id === id) return lista[i];
+  return null;
+}
+
+function contarDe_(lista, participanteId) {
+  return lista.filter(function (d) { return d.participante === participanteId; }).length;
+}
+
+function normalizar_(v) {
+  return String(v === null || v === undefined ? '' : v)
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase().trim();
+}
+
+function limpiarTexto_(v, max) {
+  return String(v || '').replace(/\r\n?/g, '\n').trim().slice(0, max);
+}
+
+function normalizarLink_(v) {
+  var link = String(v || '').trim();
+  if (!link) return '';
+  // Si pegaron texto con el link adentro ("Mira esto https://..."), se queda solo el link.
+  var dentro = link.match(/https?:\/\/\S+/i);
+  if (dentro) link = dentro[0];
+  if (!/^https?:\/\//i.test(link)) {
+    if (/^[\w-]+(\.[\w-]+)+(\/\S*)?$/.test(link)) link = 'https://' + link;
+    else throw new ErrorUsuario_('El link no parece válido. Cópialo otra vez desde la tienda.');
+  }
+  if (link.length > MAX_LINK) throw new ErrorUsuario_('El link es demasiado largo.');
+  return link;
+}
+
+function nuevoId_(prefijo, usados) {
+  var id;
+  do {
+    id = prefijo + Utilities.getUuid().replace(/-/g, '').slice(0, 6);
+  } while (usados.indexOf(id) >= 0);
+  return id;
+}
+
+function nuevaClave_(usadas) {
+  var letras = 'abcdefghjkmnpqrstuvwxyz23456789';
+  var clave;
+  do {
+    var hex = Utilities.getUuid().replace(/-/g, '');
+    clave = '';
+    for (var i = 0; i < 10; i++) clave += letras.charAt(parseInt(hex.substr(i * 2, 2), 16) % letras.length);
+  } while (usadas.indexOf(clave) >= 0);
+  return clave;
+}
+
+function primerNombre_(nombre) {
+  return String(nombre).trim().split(/\s+/)[0];
+}
+
+function esFecha_(v) {
+  return Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v.getTime());
+}
