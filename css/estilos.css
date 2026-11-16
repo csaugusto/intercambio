@@ -225,6 +225,14 @@ svg { flex: none; }
 
 .boton-chico-peligro { background: var(--rojo-claro); color: var(--rojo); }
 
+.aviso-maximo {
+  margin: .75rem 0 0;
+  padding: .7rem .9rem;
+  border-radius: var(--radio-chico);
+  background: var(--fondo);
+  font-size: .9375rem;
+}
+
 .enlace-suave {
   display: block;
   text-align: center;

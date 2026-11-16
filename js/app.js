@@ -18,6 +18,7 @@
   var API_URL = String(CONFIG.apiUrl || '').trim();
   var MODO_DEMO = !API_URL;
   var MINIMO = 3;
+  var MAXIMO = 12; // el mismo límite que tiene la hoja (MAX_DESEOS_POR_PERSONA)
   var SUFIJO = MODO_DEMO ? '.demo' : '';
   var LS_YO = 'intercambio.yo' + SUFIJO;
   var LS_CACHE = 'intercambio.cache' + SUFIJO;
@@ -603,8 +604,13 @@
       }).join('') + '</ol>';
     }
 
-    html += '<a class="boton ' + (faltan > 0 ? 'boton-principal' : 'boton-secundario') + '" href="#/nuevo">' +
-      ICONOS.mas + (n === 0 ? 'Agregar mi primera opción' : 'Agregar otra opción') + '</a>';
+    if (n < MAXIMO) {
+      html += '<a class="boton boton-principal" href="#/nuevo">' +
+        ICONOS.mas + (n === 0 ? 'Agregar mi primera opción' : 'Agregar otra opción') + '</a>';
+    } else {
+      html += '<p class="aviso-maximo">Ya tienes ' + MAXIMO + ' opciones, que es el máximo. ' +
+        'Si quieres poner otra, cambia o borra alguna.</p>';
+    }
     if (n) {
       html += '<a class="enlace-suave" href="#/persona/' + encodeURIComponent(mio.id) + '">Ver cómo ven los demás mi lista</a>';
     }
@@ -686,7 +692,9 @@
       }).join('') + '</ol>';
     }
 
-    if (esYo) html += '<a class="boton boton-principal" href="#/nuevo">' + ICONOS.mas + 'Agregar otra opción</a>';
+    if (esYo && p.deseos.length < MAXIMO) {
+      html += '<a class="boton boton-principal" href="#/nuevo">' + ICONOS.mas + 'Agregar otra opción</a>';
+    }
     html += '<a class="boton boton-secundario" href="#/">' + ICONOS.regresar + 'Regresar al inicio</a>';
     return html;
   }
