@@ -5,16 +5,15 @@
  * como "Aplicación web". La página de GitHub le habla a esta URL para leer y
  * guardar las opciones de regalo.
  *
- * Hojas que usa (las crea el menú "Intercambio > 1. Preparar las hojas"):
- *   - Participantes: una fila por persona. Tú escribes Nombre y, si quieres,
- *     Teléfono. Lo demás (ID, Clave, links) se llena solo.
+ * Hojas que usa (las crea el menú "Intercambio > Preparar las hojas"):
+ *   - Participantes: una fila por persona (ID y Nombre). Puedes escribir los
+ *     nombres tú, o cada quien se agrega solo desde la página. El ID se pone solo.
  *   - Deseos: una fila por cada opción de regalo. La llena la página.
- *   - Configuración: título, fecha (opcional) y el link de la página.
+ *   - Configuración: título, fecha (opcional), mensaje y quién ayuda.
  *
- * Seguridad: cada persona entra con su clave (va dentro de su link personal).
- * Sin clave válida no se puede ver nada, y cada quien solo puede cambiar sus
- * propias opciones. El sorteo no se guarda aquí: todos ven todas las listas,
- * así nadie se entera de a quién le regala cada quien.
+ * Todos entran con el mismo link. La primera vez, cada quien toca su nombre y
+ * el celular lo recuerda. El sorteo no se guarda aquí: todos ven todas las
+ * listas, así nadie se entera de a quién le regala cada quien.
  */
 
 var HOJA_PARTICIPANTES = 'Participantes';
@@ -25,16 +24,14 @@ var MAX_DESEOS_POR_PERSONA = 12;
 var MAX_TEXTO = 1500;
 var MAX_LINK = 2000;
 var MAX_FOTO_BYTES = 6 * 1024 * 1024;
+var MAX_NOMBRE = 60;
+var MAX_PARTICIPANTES = 200;
 
 // Encabezados de cada hoja. Se buscan por nombre (sin importar acentos ni
 // mayúsculas), así que el organizador puede mover las columnas de lugar.
 var COLUMNAS_PARTICIPANTES = [
   { clave: 'id', titulo: 'ID' },
-  { clave: 'nombre', titulo: 'Nombre' },
-  { clave: 'telefono', titulo: 'Teléfono (opcional)' },
-  { clave: 'clave', titulo: 'Clave' },
-  { clave: 'link', titulo: 'Link personal' },
-  { clave: 'whatsapp', titulo: 'Mandar por WhatsApp' }
+  { clave: 'nombre', titulo: 'Nombre' }
 ];
 
 var COLUMNAS_DESEOS = [
@@ -52,8 +49,7 @@ var CONFIG_INICIAL = [
   ['Título', 'Intercambio Navideño 2026'],
   ['Fecha del intercambio', ''],
   ['Mensaje para todos', ''],
-  ['Quién ayuda', ''],
-  ['Link de la página', 'https://TU-USUARIO.github.io/intercambio/']
+  ['Quién ayuda', '']
 ];
 
 /* ------------------------------------------------------------------ */
@@ -67,9 +63,8 @@ function doGet(e) {
     if (!accion) {
       return { ok: true, mensaje: 'El intercambio está funcionando.' };
     }
-    var yo = identificar_(p.clave);
-    if (accion === 'datos') return accionDatos_(yo);
-    if (accion === 'foto') return accionFoto_(yo, p.id);
+    if (accion === 'datos') return accionDatos_();
+    if (accion === 'foto') return accionFoto_(p.id);
     throw new ErrorUsuario_('Acción desconocida.');
   });
 }
@@ -82,7 +77,8 @@ function doPost(e) {
     } catch (err) {
       throw new ErrorUsuario_('No se entendió la petición.');
     }
-    var yo = identificar_(cuerpo.clave);
+    if (cuerpo.accion === 'registrar') return accionRegistrar_(cuerpo);
+    var yo = participante_(cuerpo.participante);
     if (cuerpo.accion === 'guardar') return accionGuardar_(yo, cuerpo);
     if (cuerpo.accion === 'borrar') return accionBorrar_(yo, cuerpo);
     throw new ErrorUsuario_('Acción desconocida.');
@@ -117,18 +113,83 @@ function ErrorUsuario_(mensaje, codigo) {
 /* Acciones                                                            */
 /* ------------------------------------------------------------------ */
 
-function identificar_(clave) {
-  clave = String(clave || '').trim();
-  if (!clave) throw new ErrorUsuario_('Falta tu link personal.', 'sin-clave');
-  var participantes = leerParticipantes_();
-  for (var i = 0; i < participantes.length; i++) {
-    var p = participantes[i];
-    if (p.clave && p.id && p.clave === clave) return p;
+/** Busca a la persona que eligió su nombre en la página. */
+function participante_(id) {
+  id = String(id || '').trim();
+  if (id) {
+    var lista = leerParticipantes_();
+    for (var i = 0; i < lista.length; i++) if (lista[i].id === id) return lista[i];
   }
-  throw new ErrorUsuario_('Ese link ya no es válido. Pídele uno nuevo a quien organiza.', 'clave-invalida');
+  throw new ErrorUsuario_('No te encontramos en la lista. Vuelve a elegir tu nombre.', 'sin-participante');
 }
 
-function accionDatos_(yo) {
+/** Agrega a alguien que no estaba en la lista (o devuelve a quien ya tenía ese nombre). */
+function accionRegistrar_(cuerpo) {
+  var nombre = String(cuerpo.nombre || '').replace(/\s+/g, ' ').trim().slice(0, MAX_NOMBRE);
+  if (!nombre) throw new ErrorUsuario_('Escribe tu nombre.');
+  asegurarIds_(true);
+  var candado = esperarCandado_('');
+  try {
+    var hoja = obtenerHoja_(HOJA_PARTICIPANTES);
+    var tabla = leerTabla_(hoja, COLUMNAS_PARTICIPANTES);
+    var ix = tabla.indices;
+    var buscado = normalizar_(nombre);
+    var usados = [];
+    var cuantos = 0;
+    for (var i = 0; i < tabla.filas.length; i++) {
+      var n = celda_(tabla.filas[i], ix.nombre);
+      var id = celda_(tabla.filas[i], ix.id);
+      if (id) usados.push(String(id));
+      if (!n) continue;
+      cuantos++;
+      if (id && normalizar_(n) === buscado) return { ok: true, persona: { id: String(id), nombre: n } };
+    }
+    if (cuantos >= MAX_PARTICIPANTES) throw new ErrorUsuario_('Ya no caben más personas en la lista.');
+    var nueva = { id: nuevoId_('p', usados), nombre: nombre };
+    var fila = [];
+    for (var j = 0; j < tabla.ancho; j++) fila.push('');
+    ponerEnFila_(fila, ix, nueva);
+    hoja.appendRow(fila);
+    return { ok: true, persona: nueva };
+  } finally {
+    candado.releaseLock();
+  }
+}
+
+/**
+ * Pone ID a los nombres que el organizador escribió a mano en Participantes.
+ * El ID es lo que une a cada persona con sus opciones en la hoja Deseos.
+ */
+function asegurarIds_(conCandado) {
+  var hoja = obtenerHoja_(HOJA_PARTICIPANTES);
+  var tabla = leerTabla_(hoja, COLUMNAS_PARTICIPANTES);
+  var ix = tabla.indices;
+  var faltan = tabla.filas.some(function (f) { return celda_(f, ix.nombre) && !celda_(f, ix.id); });
+  if (!faltan) return;
+  if (ix.id < 0 || ix.nombre < 0) {
+    throw new ErrorUsuario_('A la hoja Participantes le faltan columnas. Usa Intercambio > Preparar las hojas.');
+  }
+  var candado = conCandado ? esperarCandado_('') : null;
+  try {
+    tabla = leerTabla_(hoja, COLUMNAS_PARTICIPANTES);
+    var usados = [];
+    tabla.filas.forEach(function (f) { if (celda_(f, ix.id)) usados.push(String(celda_(f, ix.id))); });
+    var columna = tabla.filas.map(function (f) {
+      var id = celda_(f, ix.id);
+      if (celda_(f, ix.nombre) && !id) {
+        id = nuevoId_('p', usados);
+        usados.push(id);
+      }
+      return [id];
+    });
+    if (columna.length) hoja.getRange(2, ix.id + 1, columna.length, 1).setValues(columna);
+  } finally {
+    if (candado) candado.releaseLock();
+  }
+}
+
+function accionDatos_() {
+  asegurarIds_(true);
   var config = leerConfig_();
   var participantes = leerParticipantes_().filter(function (p) { return p.id; });
   var deseos = leerDeseos_();
@@ -149,12 +210,11 @@ function accionDatos_(yo) {
       mensaje: config.mensaje,
       ayuda: config.ayuda
     },
-    yo: { id: yo.id, nombre: yo.nombre },
     personas: personas
   };
 }
 
-function accionFoto_(yo, fotoId) {
+function accionFoto_(fotoId) {
   fotoId = String(fotoId || '').trim();
   if (!fotoId) throw new ErrorUsuario_('Falta la foto.');
   // Solo se sirven fotos que pertenecen a una opción de regalo. Así nadie
@@ -340,8 +400,7 @@ function leerParticipantes_() {
     lista.push({
       fila: i + 2,
       id: celda_(f, ix.id),
-      nombre: nombre,
-      clave: celda_(f, ix.clave)
+      nombre: nombre
     });
   });
   return lista;
@@ -387,8 +446,7 @@ function leerConfig_() {
     titulo: datos['titulo'] || 'Intercambio Navideño',
     fecha: textoDeFecha_(datos['fecha del intercambio']),
     mensaje: datos['mensaje para todos'] || '',
-    ayuda: datos['quien ayuda'] || '',
-    linkPagina: datos['link de la pagina'] || ''
+    ayuda: datos['quien ayuda'] || ''
   };
 }
 
@@ -454,18 +512,17 @@ function carpetaFotos_() {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Intercambio')
-    .addItem('1. Preparar las hojas', 'prepararHojas')
-    .addItem('2. Generar links personales', 'generarLinks')
+    .addItem('Preparar las hojas', 'prepararHojas')
     .addToUi();
 }
 
-/** Al escribir un nombre nuevo en Participantes, se le asigna su clave y su link. */
+/** Al escribir un nombre nuevo en Participantes, se le pone su ID. */
 function onEdit(e) {
   try {
     if (!e || !e.range) return;
     var hoja = e.range.getSheet();
     if (hoja.getName() !== HOJA_PARTICIPANTES || e.range.getRow() < 2) return;
-    completarParticipantes_();
+    asegurarIds_(false);
   } catch (err) {
     console.warn(err);
   }
@@ -487,14 +544,8 @@ function prepararHojas() {
   asegurarEncabezados_(participantes, COLUMNAS_PARTICIPANTES);
   var ixP = leerTabla_(participantes, COLUMNAS_PARTICIPANTES).indices;
   participantes.setColumnWidth(ixP.id + 1, 70);
-  participantes.setColumnWidth(ixP.nombre + 1, 180);
-  participantes.setColumnWidth(ixP.telefono + 1, 150);
-  participantes.setColumnWidth(ixP.clave + 1, 120);
-  participantes.setColumnWidth(ixP.link + 1, 320);
-  participantes.setColumnWidth(ixP.whatsapp + 1, 180);
-  var filasP = participantes.getMaxRows() - 1;
-  participantes.getRange(2, ixP.nombre + 1, filasP, 1).setNumberFormat('@');
-  participantes.getRange(2, ixP.telefono + 1, filasP, 1).setNumberFormat('@');
+  participantes.setColumnWidth(ixP.nombre + 1, 220);
+  participantes.getRange(2, ixP.nombre + 1, participantes.getMaxRows() - 1, 1).setNumberFormat('@');
 
   var deseos = libro.getSheetByName(HOJA_DESEOS) || libro.insertSheet(HOJA_DESEOS);
   asegurarEncabezados_(deseos, COLUMNAS_DESEOS);
@@ -519,92 +570,11 @@ function prepararHojas() {
   SpreadsheetApp.getUi().alert(
     'Listo',
     'Ya están las hojas.\n\n' +
-    '1) En "Participantes" escribe el nombre de cada persona (columna Nombre).\n' +
-    '2) En "Configuración" pon el link de tu página de GitHub.\n' +
-    '3) Usa Intercambio > 2. Generar links personales.',
+    'Comparte el link de la página en el WhatsApp de la familia. La primera vez, cada quien ' +
+    'toca su nombre en la lista, o lo escribe si no aparece.\n\n' +
+    'Si quieres que ya aparezcan, escribe los nombres en "Participantes" (columna Nombre).',
     SpreadsheetApp.getUi().ButtonSet.OK
   );
-}
-
-function generarLinks() {
-  var resumen = completarParticipantes_();
-  var ui = SpreadsheetApp.getUi();
-  if (!resumen.linkListo) {
-    ui.alert('Falta el link de la página',
-      'Ya se generaron las claves, pero en la hoja "Configuración" falta poner el link de tu página de GitHub ' +
-      '(algo como https://tu-usuario.github.io/intercambio/). Ponlo y vuelve a usar este menú.',
-      ui.ButtonSet.OK);
-    return;
-  }
-  ui.alert('Links listos',
-    'Se generaron ' + resumen.total + ' links personales.\n\n' +
-    'En la columna "Mandar por WhatsApp" toca el enlace de cada persona: se abre WhatsApp con el mensaje ya escrito. ' +
-    'Si pusiste su teléfono, se abre directo su chat; si no, eliges el contacto.',
-    ui.ButtonSet.OK);
-}
-
-/** Asigna ID y clave a quien no tenga, y arma su link personal y su mensaje de WhatsApp. */
-function completarParticipantes_() {
-  var hoja = obtenerHoja_(HOJA_PARTICIPANTES);
-  var tabla = leerTabla_(hoja, COLUMNAS_PARTICIPANTES);
-  var ix = tabla.indices;
-  if (ix.nombre < 0 || ix.id < 0 || ix.clave < 0) {
-    throw new ErrorUsuario_('A la hoja Participantes le faltan columnas. Usa Intercambio > 1. Preparar las hojas.');
-  }
-  var config = leerConfig_();
-  var base = String(config.linkPagina || '').trim();
-  var linkListo = /^https?:\/\//i.test(base) && base.indexOf('TU-USUARIO') < 0;
-  if (linkListo && !/\/$/.test(base) && !/\.html?$/i.test(base)) base += '/';
-
-  var idsUsados = [];
-  var clavesUsadas = [];
-  tabla.filas.forEach(function (f) {
-    if (celda_(f, ix.id)) idsUsados.push(String(celda_(f, ix.id)));
-    if (celda_(f, ix.clave)) clavesUsadas.push(String(celda_(f, ix.clave)));
-  });
-
-  var n = tabla.filas.length;
-  if (n === 0) return { total: 0, linkListo: linkListo };
-  var colId = [], colClave = [], colLink = [], colWa = [];
-  var total = 0;
-
-  tabla.filas.forEach(function (f) {
-    var nombre = celda_(f, ix.nombre);
-    var id = celda_(f, ix.id);
-    var clave = celda_(f, ix.clave);
-    var link = '';
-    var wa = SpreadsheetApp.newRichTextValue().setText('').build();
-    if (nombre) {
-      total++;
-      if (!id) { id = nuevoId_('p', idsUsados); idsUsados.push(id); }
-      if (!clave) { clave = nuevaClave_(clavesUsadas); clavesUsadas.push(clave); }
-      if (linkListo) {
-        link = base + '?c=' + encodeURIComponent(clave);
-        var tel = String(celda_(f, ix.telefono)).replace(/\D/g, '');
-        var mensaje =
-          'Hola ' + primerNombre_(nombre) + '. Este es tu link personal para el ' + config.titulo + ':\n\n' +
-          link + '\n\n' +
-          'Ahí puedes escribir lo que te gustaría recibir y ver lo que pidió la persona a la que le vas a regalar. ' +
-          'Es solo para ti, no lo compartas.';
-        wa = SpreadsheetApp.newRichTextValue()
-          .setText('Enviar a ' + nombre)
-          .setLinkUrl('https://wa.me/' + tel + '?text=' + encodeURIComponent(mensaje))
-          .build();
-      } else {
-        link = 'Falta el link de la página en Configuración';
-      }
-    }
-    colId.push([id]);
-    colClave.push([clave]);
-    colLink.push([link]);
-    colWa.push([wa]);
-  });
-
-  hoja.getRange(2, ix.id + 1, n, 1).setValues(colId);
-  hoja.getRange(2, ix.clave + 1, n, 1).setValues(colClave);
-  if (ix.link >= 0) hoja.getRange(2, ix.link + 1, n, 1).setValues(colLink);
-  if (ix.whatsapp >= 0) hoja.getRange(2, ix.whatsapp + 1, n, 1).setRichTextValues(colWa);
-  return { total: total, linkListo: linkListo };
 }
 
 function asegurarEncabezados_(hoja, columnas) {
@@ -699,21 +669,6 @@ function nuevoId_(prefijo, usados) {
     id = prefijo + Utilities.getUuid().replace(/-/g, '').slice(0, 6);
   } while (usados.indexOf(id) >= 0);
   return id;
-}
-
-function nuevaClave_(usadas) {
-  var letras = 'abcdefghjkmnpqrstuvwxyz23456789';
-  var clave;
-  do {
-    var hex = Utilities.getUuid().replace(/-/g, '');
-    clave = '';
-    for (var i = 0; i < 10; i++) clave += letras.charAt(parseInt(hex.substr(i * 2, 2), 16) % letras.length);
-  } while (usadas.indexOf(clave) >= 0);
-  return clave;
-}
-
-function primerNombre_(nombre) {
-  return String(nombre).trim().split(/\s+/)[0];
 }
 
 function esFecha_(v) {

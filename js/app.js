@@ -1,8 +1,8 @@
 /*
  * Intercambio navideño: la página.
  *
- * Cada persona entra con su link personal (…/?c=CLAVE). La clave se guarda
- * en el celular para que la próxima vez baste con abrir la página.
+ * Todos entran con el mismo link. La primera vez, cada quien toca su nombre
+ * (o lo escribe si no aparece) y el celular lo recuerda.
  *
  * Vistas (se cambian con el # de la dirección para que el botón "atrás"
  * del celular funcione como se espera):
@@ -18,14 +18,15 @@
   var API_URL = String(CONFIG.apiUrl || '').trim();
   var MODO_DEMO = !API_URL;
   var MINIMO = 3;
-  var LS_CLAVE = 'intercambio.clave';
-  var LS_CACHE = 'intercambio.cache.';
+  var SUFIJO = MODO_DEMO ? '.demo' : '';
+  var LS_YO = 'intercambio.yo' + SUFIJO;
+  var LS_CACHE = 'intercambio.cache' + SUFIJO;
   var FOTO_MAX_LADO = 1400;
 
   var app = document.getElementById('app');
 
   var estado = {
-    clave: '',
+    yoId: '',
     datos: null,
     ultimaCarga: 0,
     sinConexion: false,
@@ -68,6 +69,11 @@
       var visible = dominio(limpio.replace(/&amp;/g, '&'));
       return '<a href="' + limpio + '" target="_blank" rel="noopener noreferrer">' + esc(visible) + '</a>' + resto;
     });
+  }
+
+  function normalizar(v) {
+    return String(v || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ').toLowerCase().trim();
   }
 
   function plural(n) { return n === 1 ? '1 opción' : n + ' opciones'; }
@@ -147,21 +153,25 @@
 
   var api = {
     datos: function () {
-      return MODO_DEMO ? demo.datos() : pedirGet({ accion: 'datos', clave: estado.clave });
+      return MODO_DEMO ? demo.datos() : pedirGet({ accion: 'datos' });
     },
     foto: function (id) {
       if (MODO_DEMO) return demo.foto(id);
-      return pedirGet({ accion: 'foto', clave: estado.clave, id: id }).then(function (r) {
+      return pedirGet({ accion: 'foto', id: id }).then(function (r) {
         return 'data:' + r.tipo + ';base64,' + r.datos;
       });
     },
+    registrar: function (nombre) {
+      var cuerpo = { accion: 'registrar', nombre: nombre };
+      return MODO_DEMO ? demo.registrar(cuerpo) : pedirPost(cuerpo);
+    },
     guardar: function (cuerpo) {
       cuerpo.accion = 'guardar';
-      cuerpo.clave = estado.clave;
+      cuerpo.participante = estado.yoId;
       return MODO_DEMO ? demo.guardar(cuerpo) : pedirPost(cuerpo);
     },
     borrar: function (id) {
-      var cuerpo = { accion: 'borrar', clave: estado.clave, id: id };
+      var cuerpo = { accion: 'borrar', participante: estado.yoId, id: id };
       return MODO_DEMO ? demo.borrar(cuerpo) : pedirPost(cuerpo);
     }
   };
@@ -190,15 +200,8 @@
   /* ---------------------------------------------------------------- */
 
   function iniciar() {
-    var params = new URLSearchParams(location.search);
-    // La clave del link se recuerda hasta que se comprueba que sirve (ver cargar),
-    // para que un link viejo no borre uno bueno que ya estaba guardado.
-    var clave = (params.get('c') || '').trim() || almacen.leer(LS_CLAVE) || '';
-    if (MODO_DEMO) {
-      clave = 'demo';
-      $('#aviso-demo').hidden = false;
-    }
-    estado.clave = clave;
+    if (MODO_DEMO) $('#aviso-demo').hidden = false;
+    estado.yoId = almacen.leer(LS_YO) || '';
 
     document.addEventListener('click', alHacerClic);
     window.addEventListener('hashchange', function () { pintar(); });
@@ -209,9 +212,7 @@
       d.addEventListener('click', function (ev) { if (ev.target === d) d.close(); });
     });
 
-    if (!clave) { pantallaSinClave(); return; }
-
-    var guardado = almacen.leer(LS_CACHE + clave);
+    var guardado = almacen.leer(LS_CACHE);
     if (guardado) {
       try { estado.datos = JSON.parse(guardado); pintar(); } catch (e) { estado.datos = null; }
     }
@@ -223,17 +224,9 @@
       estado.datos = datos;
       estado.ultimaCarga = Date.now();
       estado.sinConexion = false;
-      if (!MODO_DEMO) almacen.guardar(LS_CLAVE, estado.clave);
       guardarCache();
       pintar({ desdeRecarga: true });
     }, function (err) {
-      if (err.codigo === 'clave-invalida' || err.codigo === 'sin-clave') {
-        almacen.borrar(LS_CACHE + estado.clave);
-        if (almacen.leer(LS_CLAVE) === estado.clave) almacen.borrar(LS_CLAVE);
-        estado.datos = null;
-        pantallaMensaje('Este link ya no funciona', err.message);
-        return;
-      }
       if (estado.datos) {
         estado.sinConexion = true;
         pintar({ desdeRecarga: true });
@@ -244,7 +237,7 @@
   }
 
   function guardarCache() {
-    if (estado.datos) almacen.guardar(LS_CACHE + estado.clave, JSON.stringify(estado.datos));
+    if (estado.datos) almacen.guardar(LS_CACHE, JSON.stringify(estado.datos));
   }
 
   function persona(id) {
@@ -253,14 +246,32 @@
     return null;
   }
 
+  /** La persona que usa este celular, o null si todavía no elige su nombre. */
   function yo() {
-    var d = estado.datos;
-    var p = persona(d.yo.id);
-    if (!p) {
-      p = { id: d.yo.id, nombre: d.yo.nombre, deseos: [] };
-      d.personas.push(p);
-    }
-    return p;
+    return estado.yoId ? persona(estado.yoId) : null;
+  }
+
+  function elegirPersona(id) {
+    estado.yoId = id;
+    almacen.guardar(LS_YO, id);
+    if (location.hash && location.hash !== '#/') location.hash = '#/';
+    else pintar();
+  }
+
+  function olvidarPersona() {
+    estado.yoId = '';
+    almacen.borrar(LS_YO);
+    if (location.hash && location.hash !== '#/') location.hash = '#/';
+    else pintar();
+  }
+
+  /** Si a la persona la quitaron de la hoja, se le vuelve a preguntar quién es. */
+  function siYaNoExiste(err) {
+    if (err.codigo !== 'sin-participante') return false;
+    avisar(err.message, true);
+    olvidarPersona();
+    cargar();
+    return true;
   }
 
   /* ---------------------------------------------------------------- */
@@ -285,7 +296,10 @@
     if (desdeRecarga && ruta.vista === 'formulario' && $('#formulario')) return;
 
     var html;
-    if (ruta.vista === 'persona') html = vistaPersona(ruta.id);
+    var preguntar = !yo();
+    if (preguntar && desdeRecarga && $('#form-registro')) return;
+    if (preguntar) html = vistaQuienEres();
+    else if (ruta.vista === 'persona') html = vistaPersona(ruta.id);
     else if (ruta.vista === 'formulario') html = vistaFormulario(ruta.id);
     else html = vistaInicio();
 
@@ -293,7 +307,8 @@
       html = '<p class="aviso-conexion">No hay conexión: estás viendo la última información que se cargó.</p>' + html;
     }
     app.innerHTML = html;
-    if (ruta.vista === 'formulario') prepararFormulario(ruta.id);
+    if (preguntar) prepararRegistro();
+    else if (ruta.vista === 'formulario') prepararFormulario(ruta.id);
     cargarFotosVisibles();
 
     if (!desdeRecarga) {
@@ -320,6 +335,8 @@
     var otros = d.personas.filter(function (p) { return p.id !== mio.id; });
 
     var html = '<h1 class="saludo" tabindex="-1">Hola, ' + esc(mio.nombre) + '</h1>';
+    html += '<p class="cambiar-persona">¿No eres ' + esc(mio.nombre) + '? ' +
+      '<button type="button" class="enlace" data-accion="cambiar-persona">Elegir otro nombre</button></p>';
     html += '<p class="intro">Aquí puedes escribir lo que te gustaría recibir y ver lo que quiere la persona a la que le regalas.</p>';
     if (d.config && d.config.mensaje) {
       html += '<p class="mensaje-general">' + textoConEnlaces(d.config.mensaje) + '</p>';
@@ -330,6 +347,67 @@
       html += '<p class="pie">¿Dudas? Pregúntale a ' + esc(d.config.ayuda) + '.</p>';
     }
     return html;
+  }
+
+  function vistaQuienEres() {
+    var ordenados = estado.datos.personas.slice().sort(function (a, b) {
+      return a.nombre.localeCompare(b.nombre, 'es');
+    });
+    var html = '<h1 tabindex="-1">¿Quién eres?</h1>';
+    if (ordenados.length) {
+      html += '<p class="intro">Toca tu nombre. Solo te lo preguntamos esta vez.</p>' +
+        '<div class="tarjeta"><ul class="lista-familia lista-nombres">' + ordenados.map(function (p) {
+          return '<li><button type="button" class="persona-fila" data-accion="soy" data-id="' + esc(p.id) + '">' +
+            '<span class="persona-nombre">' + esc(p.nombre) + '</span>' + ICONOS.siguiente + '</button></li>';
+        }).join('') + '</ul></div>';
+    } else {
+      html += '<p class="intro">Escribe tu nombre para empezar.</p>';
+    }
+    html += '' +
+      '<form id="form-registro" class="tarjeta" novalidate>' +
+        (ordenados.length ? '<h2>¿No apareces en la lista?</h2>' : '') +
+        '<label for="nombre-nuevo" class="etiqueta-campo">Escribe tu nombre como te dicen en la familia</label>' +
+        '<input id="nombre-nuevo" type="text" maxlength="60" autocomplete="name" placeholder="Por ejemplo: Tía Rosa">' +
+        '<p class="error-formulario" id="error-registro" role="alert" hidden></p>' +
+        '<button type="submit" class="boton boton-principal">Entrar</button>' +
+      '</form>';
+    return html;
+  }
+
+  function prepararRegistro() {
+    var form = $('#form-registro');
+    if (!form) return;
+    var campo = $('#nombre-nuevo');
+    var error = $('#error-registro');
+    campo.addEventListener('input', function () { error.hidden = true; });
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var nombre = campo.value.replace(/\s+/g, ' ').trim();
+      if (!nombre) {
+        error.textContent = 'Escribe tu nombre.';
+        error.hidden = false;
+        campo.focus();
+        return;
+      }
+      var existente = estado.datos.personas.filter(function (p) {
+        return normalizar(p.nombre) === normalizar(nombre);
+      })[0];
+      if (existente) { elegirPersona(existente.id); return; }
+      mostrarOcupado('Entrando...');
+      api.registrar(nombre).then(function (r) {
+        ocultarOcupado();
+        if (!persona(r.persona.id)) {
+          estado.datos.personas.push({ id: r.persona.id, nombre: r.persona.nombre, deseos: [] });
+          guardarCache();
+        }
+        elegirPersona(r.persona.id);
+        cargar();
+      }, function (err) {
+        ocultarOcupado();
+        error.textContent = err.message || 'No se pudo. Intenta otra vez.';
+        error.hidden = false;
+      });
+    });
   }
 
   function seccionMisDeseos(mio) {
@@ -413,7 +491,7 @@
       return regresar + '<h1 tabindex="-1">No encontramos a esa persona</h1>' +
         '<p>Puede que ya no esté en la lista. Regresa al inicio para ver a todos.</p>';
     }
-    var esYo = p.id === d.yo.id;
+    var esYo = p.id === estado.yoId;
     var html = regresar;
     html += '<p class="sobre-titulo">' + (esYo ? 'Así ven los demás tu lista' : 'Lo que le gustaría a') + '</p>';
     html += '<h1 tabindex="-1">' + (esYo ? 'Mi lista' : esc(p.nombre)) + '</h1>';
@@ -681,6 +759,7 @@
     }, function (err) {
       f.guardando = false;
       ocultarOcupado();
+      if (siYaNoExiste(err)) { estado.formulario = null; return; }
       mostrarError(err.message || 'No se pudo guardar. Intenta otra vez.');
     });
   }
@@ -749,6 +828,10 @@
       pintarZonaFoto();
     } else if (accion === 'pegar') {
       pegarLink();
+    } else if (accion === 'soy') {
+      elegirPersona(el.getAttribute('data-id'));
+    } else if (accion === 'cambiar-persona') {
+      olvidarPersona();
     } else if (accion === 'reintentar') {
       app.innerHTML = '<div class="cargando"><span class="girando" aria-hidden="true"></span><p>Cargando...</p></div>';
       cargar();
@@ -772,6 +855,7 @@
       cargar();
     }, function (err) {
       ocultarOcupado();
+      if (siYaNoExiste(err)) return;
       avisar(err.message || 'No se pudo borrar. Intenta otra vez.', true);
     });
   }
@@ -817,21 +901,6 @@
     }, esError ? 7000 : 4500);
   }
 
-  function pantallaSinClave() {
-    pantallaMensaje('¡Hola!',
-      'Para entrar, abre el link personal que te mandaron por WhatsApp.',
-      'Si no lo encuentras, pídeselo a quien organiza el intercambio.');
-  }
-
-  function pantallaMensaje(titulo, texto, extra) {
-    app.innerHTML = '' +
-      '<div class="pantalla-centro">' +
-        '<h1 tabindex="-1">' + esc(titulo) + '</h1>' +
-        '<p>' + esc(texto) + '</p>' +
-        (extra ? '<p class="suave">' + esc(extra) + '</p>' : '') +
-      '</div>';
-  }
-
   function pantallaError(err) {
     app.innerHTML = '' +
       '<div class="pantalla-centro">' +
@@ -846,8 +915,7 @@
   /* ---------------------------------------------------------------- */
 
   var demo = (function () {
-    var LS = 'intercambio.demo.v3';
-
+    var LS = 'intercambio.demo.v4';
 
     function inicial() {
       return {
@@ -857,7 +925,6 @@
           mensaje: '',
           ayuda: 'quien organiza'
         },
-        yo: 'p1',
         personas: [
           { id: 'p1', nombre: 'Lupe', deseos: [
             { id: 'd1', descripcion: 'Un libro de recetas de cocina mexicana, de preferencia con fotos.', link: '', foto: '', orden: 1 }
@@ -900,19 +967,31 @@
       return new Promise(function (resolve) { setTimeout(function () { resolve(valor); }, ms || 350); });
     }
 
-    function quien(db, id) { return db.personas.filter(function (p) { return p.id === id; })[0]; }
+    function quien(db, id) {
+      var p = db.personas.filter(function (x) { return x.id === id; })[0];
+      if (!p) throw new ErrorApi('No te encontramos en la lista. Vuelve a elegir tu nombre.', 'sin-participante');
+      return p;
+    }
 
     return {
       datos: function () {
         var db = leer();
         var copia = JSON.parse(JSON.stringify(db));
         delete copia.fotos;
-        var mio = quien(db, db.yo);
-        return esperar({
-          ok: true,
-          config: copia.config,
-          yo: { id: mio.id, nombre: mio.nombre },
-          personas: copia.personas
+        return esperar({ ok: true, config: copia.config, personas: copia.personas });
+      },
+      registrar: function (cuerpo) {
+        return esperar(null, 400).then(function () {
+          var db = leer();
+          var nombre = String(cuerpo.nombre || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+          if (!nombre) throw new ErrorApi('Escribe tu nombre.');
+          var p = db.personas.filter(function (x) { return normalizar(x.nombre) === normalizar(nombre); })[0];
+          if (!p) {
+            p = { id: 'p' + Date.now(), nombre: nombre, deseos: [] };
+            db.personas.push(p);
+            escribir(db);
+          }
+          return { ok: true, persona: { id: p.id, nombre: p.nombre } };
         });
       },
       foto: function (id) {
@@ -922,7 +1001,7 @@
       guardar: function (cuerpo) {
         return esperar(null, 600).then(function () {
           var db = leer();
-          var mio = quien(db, db.yo);
+          var mio = quien(db, cuerpo.participante);
           var d = cuerpo.deseo;
           var deseo = d.id ? mio.deseos.filter(function (x) { return x.id === d.id; })[0] : null;
           if (d.id && !deseo) throw new ErrorApi('No se encontró esa opción.');
@@ -948,7 +1027,7 @@
       borrar: function (cuerpo) {
         return esperar(null, 400).then(function () {
           var db = leer();
-          var mio = quien(db, db.yo);
+          var mio = quien(db, cuerpo.participante);
           mio.deseos.forEach(function (x) {
             if (x.id === cuerpo.id && x.foto) delete db.fotos[x.foto];
           });
@@ -959,7 +1038,8 @@
       },
       reiniciar: function () {
         almacen.borrar(LS);
-        almacen.borrar(LS_CACHE + 'demo');
+        almacen.borrar(LS_CACHE);
+        almacen.borrar(LS_YO);
       }
     };
   })();

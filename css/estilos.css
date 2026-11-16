@@ -375,6 +375,28 @@ svg { flex: none; }
   color: var(--tinta-suave);
 }
 
+.lista-nombres .persona-fila {
+  width: 100%;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--borde);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lista-nombres li:first-child .persona-fila { border-top: 0; }
+
+.cambiar-persona {
+  margin: -.2rem 0 .6rem;
+  font-size: .9375rem;
+  color: var(--tinta-suave);
+}
+
+.cambiar-persona .enlace { font-size: inherit; padding: .1rem; }
+
+#form-registro .etiqueta-campo { margin-bottom: .5rem; font-weight: 400; color: var(--tinta-suave); }
+
 .persona-datos { display: flex; flex-direction: column; min-width: 0; }
 
 .persona-nombre { font-weight: 700; }
