@@ -90,9 +90,27 @@ function doPost(e) {
   });
 }
 
+/*
+ * Revision de acentos. Si el codigo se pega con los acentos danados (por
+ * ejemplo la n con tilde aparece como dos simbolos raros), la hoja ya no
+ * encuentra la pestana de Configuracion ni la columna de Descripcion, y las
+ * opciones se guardarian sin texto. Por eso se revisa antes de hacer
+ * cualquier cosa. Este comentario y el mensaje van sin acentos a proposito,
+ * para que se lean aunque pase eso.
+ */
+var PRUEBA_ACENTOS = 'ñ';
+
+function revisarAcentos_() {
+  if (PRUEBA_ACENTOS !== '\u00f1') {
+    throw new ErrorUsuario_('El codigo de la hoja se pego con los acentos danados. ' +
+      'Hay que volver a copiarlo y pegarlo en Apps Script, y publicar una nueva version.', 'acentos');
+  }
+}
+
 function responder_(fn) {
   var resultado;
   try {
+    revisarAcentos_();
     resultado = fn();
   } catch (err) {
     if (err && err.esDeUsuario) {
@@ -596,6 +614,7 @@ function onEdit(e) {
 }
 
 function prepararHojas() {
+  revisarAcentos_();
   var libro = SpreadsheetApp.getActiveSpreadsheet();
 
   var participantes = libro.getSheetByName(HOJA_PARTICIPANTES);
