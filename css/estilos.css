@@ -268,20 +268,8 @@ svg { flex: none; }
   display: flex;
   align-items: center;
   gap: .6rem;
-  font-weight: 700;
   color: var(--tinta);
 }
-
-.puntos { display: inline-flex; gap: .3rem; }
-
-.punto {
-  width: .7rem;
-  height: .7rem;
-  border-radius: 50%;
-  border: 1.5px solid var(--acento);
-}
-
-.punto.lleno { background: var(--acento); }
 
 .tarjeta > .progreso-listo { color: var(--acento); }
 
@@ -580,8 +568,6 @@ svg { flex: none; }
   color: var(--tinta-suave);
 }
 
-.ayuda-pegar { margin: .5rem 0 0; }
-
 textarea,
 input[type="text"] {
   display: block;
@@ -606,17 +592,6 @@ input[type="text"]:focus {
 }
 
 ::placeholder { color: #8d8f89; opacity: 1; }
-
-.fila-link { display: flex; gap: .5rem; }
-
-.fila-link input { flex: 1; min-width: 0; }
-
-.boton-pegar {
-  width: auto;
-  margin: 0;
-  padding: 0 1rem;
-  min-height: auto;
-}
 
 .boton-foto {
   display: flex;

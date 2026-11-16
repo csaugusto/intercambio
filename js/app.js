@@ -522,7 +522,7 @@
       '<form id="form-registro" class="tarjeta" novalidate>' +
         (ordenados.length ? '<h2>¿No apareces en la lista?</h2>' : '') +
         '<label for="nombre-nuevo" class="etiqueta-campo">Escribe tu nombre como te dicen en la familia</label>' +
-        '<input id="nombre-nuevo" type="text" maxlength="60" autocomplete="name" placeholder="Por ejemplo: Tía Rosa">' +
+        '<input id="nombre-nuevo" type="text" maxlength="60" autocomplete="name">' +
         '<p class="error-formulario" id="error-registro" role="alert" hidden></p>' +
         '<button type="submit" class="boton boton-principal">Entrar</button>' +
       '</form>';
@@ -575,11 +575,11 @@
       html += '<p>Todavía no has puesto nada. Escribe por lo menos ' + MINIMO +
         ' cosas que te gustaría recibir, así quien te regale tiene de dónde escoger.</p>';
     } else if (faltan > 0) {
-      html += '<p class="progreso">' + puntos(n) + '<span>Llevas ' + n + ' de ' + MINIMO + '. ' +
-        (faltan === 1 ? 'Te falta una.' : 'Te faltan ' + faltan + '.') + '</span></p>';
+      html += '<p class="progreso"><span><strong>Llevas ' + plural(n) + '.</strong> ' +
+        'Pon por lo menos ' + MINIMO + '; si quieres, puedes poner más.</span></p>';
     } else {
       html += '<p class="progreso progreso-listo">' + ICONOS.palomita +
-        '<span>Ya tienes ' + plural(n) + '. Si quieres, puedes agregar más.</span></p>';
+        '<span><strong>Ya tienes ' + plural(n) + '.</strong> Si quieres, puedes agregar más.</span></p>';
     }
 
     if (n) {
@@ -615,12 +615,6 @@
       html += '<a class="enlace-suave" href="#/persona/' + encodeURIComponent(mio.id) + '">Ver cómo ven los demás mi lista</a>';
     }
     return html + '</section>';
-  }
-
-  function puntos(n) {
-    var html = '<span class="puntos" aria-hidden="true">';
-    for (var i = 0; i < MINIMO; i++) html += '<span class="punto' + (i < n ? ' lleno' : '') + '"></span>';
-    return html + '</span>';
   }
 
   function seccionFamilia(otros) {
@@ -739,7 +733,6 @@
           '<h1 tabindex="-1">No encontramos esa opción</h1><p>Puede que ya la hayas borrado.</p>';
       }
     }
-    var puedePegar = !!(navigator.clipboard && navigator.clipboard.readText);
 
     return '' +
       '<a class="regresar" href="#/" data-salir>' + ICONOS.regresar + 'Regresar sin guardar</a>' +
@@ -754,13 +747,10 @@
         '</div>' +
         '<div class="campo">' +
           '<label for="link">Link de la tienda <span class="opcional">(si tienes)</span></label>' +
-          '<p class="ayuda" id="ayuda-link">Si lo viste en internet, copia el link de esa página y pégalo aquí.</p>' +
-          '<div class="fila-link">' +
-            '<input id="link" name="link" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" ' +
-              'aria-describedby="ayuda-link" placeholder="https://..." value="' + esc(deseo ? deseo.link : '') + '">' +
-            (puedePegar ? '<button type="button" class="boton boton-secundario boton-pegar" data-accion="pegar">Pegar</button>' : '') +
-          '</div>' +
-          '<p class="ayuda ayuda-pegar" id="ayuda-pegar" hidden>Mantén el dedo apretado dentro de la caja y elige <strong>Pegar</strong>.</p>' +
+          '<p class="ayuda" id="ayuda-link">Si lo viste en internet, copia el link de esa página. ' +
+            'Luego mantén el dedo apretado dentro de esta caja y elige <strong>Pegar</strong>.</p>' +
+          '<input id="link" name="link" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" ' +
+            'aria-describedby="ayuda-link" placeholder="https://..." value="' + esc(deseo ? deseo.link : '') + '">' +
         '</div>' +
         '<div class="campo">' +
           '<p class="etiqueta-campo">Foto <span class="opcional">(si tienes)</span></p>' +
@@ -1009,8 +999,6 @@
       estado.formulario.quitarFoto = true;
       estado.formulario.cambios = true;
       pintarZonaFoto();
-    } else if (accion === 'pegar') {
-      pegarLink();
     } else if (accion === 'foto-persona') {
       elegirFotoPersona(el.getAttribute('data-id'));
     } else if (accion === 'quitar-foto-persona') {
@@ -1044,20 +1032,6 @@
       ocultarOcupado();
       if (siYaNoExiste(err)) return;
       avisar(err.message || 'No se pudo borrar. Intenta otra vez.', true);
-    });
-  }
-
-  function pegarLink() {
-    var campo = $('#link');
-    navigator.clipboard.readText().then(function (texto) {
-      texto = String(texto || '').trim();
-      if (!texto) { $('#ayuda-pegar').hidden = false; campo.focus(); return; }
-      try { campo.value = normalizarLink(texto); } catch (e) { campo.value = texto; }
-      estado.formulario.cambios = true;
-      ocultarError();
-    }, function () {
-      $('#ayuda-pegar').hidden = false;
-      campo.focus();
     });
   }
 
