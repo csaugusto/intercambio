@@ -6,8 +6,9 @@
  * guardar las opciones de regalo.
  *
  * Hojas que usa (las crea el menú "Intercambio > Preparar las hojas"):
- *   - Participantes: una fila por persona (ID y Nombre). Puedes escribir los
- *     nombres tú, o cada quien se agrega solo desde la página. El ID se pone solo.
+ *   - Participantes: una fila por persona (ID, Nombre y Foto). Puedes escribir
+ *     los nombres tú, o cada quien se agrega solo desde la página. El ID y la
+ *     foto se ponen desde la página.
  *   - Deseos: una fila por cada opción de regalo. La llena la página.
  *   - Configuración: título, fecha (opcional), mensaje y quién ayuda.
  *
@@ -26,12 +27,14 @@ var MAX_LINK = 2000;
 var MAX_FOTO_BYTES = 6 * 1024 * 1024;
 var MAX_NOMBRE = 60;
 var MAX_PARTICIPANTES = 200;
+var MAX_FOTOS_POR_PEDIDO = 40;
 
 // Encabezados de cada hoja. Se buscan por nombre (sin importar acentos ni
 // mayúsculas), así que el organizador puede mover las columnas de lugar.
 var COLUMNAS_PARTICIPANTES = [
   { clave: 'id', titulo: 'ID' },
-  { clave: 'nombre', titulo: 'Nombre' }
+  { clave: 'nombre', titulo: 'Nombre' },
+  { clave: 'foto', titulo: 'Foto' }
 ];
 
 var COLUMNAS_DESEOS = [
@@ -65,6 +68,7 @@ function doGet(e) {
     }
     if (accion === 'datos') return accionDatos_();
     if (accion === 'foto') return accionFoto_(p.id);
+    if (accion === 'fotos') return accionFotos_(p.ids);
     throw new ErrorUsuario_('Acción desconocida.');
   });
 }
@@ -78,6 +82,7 @@ function doPost(e) {
       throw new ErrorUsuario_('No se entendió la petición.');
     }
     if (cuerpo.accion === 'registrar') return accionRegistrar_(cuerpo);
+    if (cuerpo.accion === 'fotoPersona') return accionFotoPersona_(cuerpo);
     var yo = participante_(cuerpo.participante);
     if (cuerpo.accion === 'guardar') return accionGuardar_(yo, cuerpo);
     if (cuerpo.accion === 'borrar') return accionBorrar_(yo, cuerpo);
@@ -199,7 +204,7 @@ function accionDatos_() {
       .filter(function (d) { return d.participante === p.id; })
       .sort(function (a, b) { return a.orden - b.orden; })
       .map(deseoPublico_);
-    return { id: p.id, nombre: p.nombre, deseos: suyos };
+    return { id: p.id, nombre: p.nombre, foto: p.foto || '', deseos: suyos };
   });
 
   return {
@@ -214,19 +219,80 @@ function accionDatos_() {
   };
 }
 
+/**
+ * Solo se sirven fotos que están en la hoja (de una opción de regalo o de una
+ * persona). Así nadie puede usar esta URL para leer otros archivos del Drive.
+ */
+function fotosPermitidas_() {
+  var permitidas = {};
+  leerDeseos_().forEach(function (d) { if (d.foto) permitidas[d.foto] = true; });
+  leerParticipantes_().forEach(function (p) { if (p.foto) permitidas[p.foto] = true; });
+  return permitidas;
+}
+
+function leerFoto_(fotoId) {
+  var blob = DriveApp.getFileById(fotoId).getBlob();
+  return { tipo: blob.getContentType(), datos: Utilities.base64Encode(blob.getBytes()) };
+}
+
 function accionFoto_(fotoId) {
   fotoId = String(fotoId || '').trim();
   if (!fotoId) throw new ErrorUsuario_('Falta la foto.');
-  // Solo se sirven fotos que pertenecen a una opción de regalo. Así nadie
-  // puede usar esta URL para leer otros archivos del Drive del organizador.
-  var existe = leerDeseos_().some(function (d) { return d.foto === fotoId; });
-  if (!existe) throw new ErrorUsuario_('No se encontró la foto.');
-  var blob = DriveApp.getFileById(fotoId).getBlob();
-  return {
-    ok: true,
-    tipo: blob.getContentType(),
-    datos: Utilities.base64Encode(blob.getBytes())
-  };
+  if (!fotosPermitidas_()[fotoId]) throw new ErrorUsuario_('No se encontró la foto.');
+  var foto = leerFoto_(fotoId);
+  return { ok: true, tipo: foto.tipo, datos: foto.datos };
+}
+
+/** Varias fotos de un jalón (las de las personas, que son chiquitas). */
+function accionFotos_(ids) {
+  var permitidas = fotosPermitidas_();
+  var fotos = {};
+  String(ids || '').split(',').slice(0, MAX_FOTOS_POR_PEDIDO).forEach(function (id) {
+    id = id.trim();
+    if (!id || !permitidas[id] || fotos[id]) return;
+    try {
+      fotos[id] = leerFoto_(id);
+    } catch (err) {
+      console.warn('No se pudo leer la foto ' + id + ': ' + err);
+    }
+  });
+  return { ok: true, fotos: fotos };
+}
+
+/** Pone, cambia o quita la foto de una persona. Cualquiera puede hacerlo. */
+function accionFotoPersona_(cuerpo) {
+  var id = String(cuerpo.persona || '').trim();
+  var persona = null;
+  leerParticipantes_().forEach(function (p) { if (p.id && p.id === id) persona = p; });
+  if (!persona) throw new ErrorUsuario_('No se encontró a esa persona. Recarga la página.');
+  var quitar = !!cuerpo.quitar;
+  if (!quitar && !(cuerpo.foto && cuerpo.foto.datos)) throw new ErrorUsuario_('Falta la foto.');
+
+  var nueva = quitar ? '' : guardarFoto_({ tipo: cuerpo.foto.tipo, datos: cuerpo.foto.datos, persona: true }, persona);
+  var vieja = '';
+  var candado = esperarCandado_(nueva);
+  try {
+    var hoja = obtenerHoja_(HOJA_PARTICIPANTES);
+    var tabla = leerTabla_(hoja, COLUMNAS_PARTICIPANTES);
+    if (tabla.indices.foto < 0) {
+      // Hojas hechas antes de que existieran las fotos: se agrega la columna.
+      asegurarEncabezados_(hoja, COLUMNAS_PARTICIPANTES);
+      tabla = leerTabla_(hoja, COLUMNAS_PARTICIPANTES);
+    }
+    var ix = tabla.indices;
+    var fila = -1;
+    tabla.filas.forEach(function (f, i) { if (celda_(f, ix.id) === id) fila = i + 2; });
+    if (fila < 0) {
+      if (nueva) borrarFoto_(nueva);
+      throw new ErrorUsuario_('No se encontró a esa persona. Recarga la página.');
+    }
+    vieja = String(celda_(tabla.filas[fila - 2], ix.foto));
+    hoja.getRange(fila, ix.foto + 1).setValues([[nueva]]);
+  } finally {
+    candado.releaseLock();
+  }
+  if (vieja && vieja !== nueva) borrarFoto_(vieja);
+  return { ok: true, foto: nueva };
 }
 
 function accionGuardar_(yo, cuerpo) {
@@ -400,7 +466,8 @@ function leerParticipantes_() {
     lista.push({
       fila: i + 2,
       id: celda_(f, ix.id),
-      nombre: nombre
+      nombre: nombre,
+      foto: String(celda_(f, ix.foto))
     });
   });
   return lista;
@@ -471,7 +538,7 @@ function guardarFoto_(foto, yo) {
   }
   if (bytes.length > MAX_FOTO_BYTES) throw new ErrorUsuario_('La foto es muy grande. Intenta con otra.');
   var extension = tipo.split('/')[1].replace('jpeg', 'jpg');
-  var nombre = yo.nombre + ' - ' + Utilities.formatDate(new Date(), 'GMT', 'yyyyMMdd-HHmmss') + '.' + extension;
+  var nombre = (foto.persona ? 'Foto de ' : '') + yo.nombre + ' - ' + Utilities.formatDate(new Date(), 'GMT', 'yyyyMMdd-HHmmss') + '.' + extension;
   return carpetaFotos_().createFile(Utilities.newBlob(bytes, tipo, nombre)).getId();
 }
 

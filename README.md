@@ -39,7 +39,7 @@ Se crean tres hojas:
 
 | Hoja | Qué va ahí |
 |---|---|
-| **Participantes** | ID y Nombre. Puedes escribir los nombres tú, o dejar que cada quien se agregue desde la página. El ID se pone solo. |
+| **Participantes** | ID, Nombre y Foto. Puedes escribir los nombres tú, o dejar que cada quien se agregue desde la página. El ID y la foto se ponen desde la página. |
 | **Deseos** | Las opciones de regalo. La llena la página. |
 | **Configuración** | Título, fecha (si quieres), un mensaje para todos y quién ayuda. |
 
@@ -64,6 +64,11 @@ Implementar**. La URL no cambia.
 
 ## Preguntas frecuentes
 
+**¿Cómo se pone la foto de alguien?** En la página de esa persona (tocando su nombre)
+hay un botón *Poner su foto*. Cualquiera puede ponerla o cambiarla, así se le puede
+poner la foto a los abuelos. Cada quien también tiene *Poner mi foto* en su inicio.
+Quien no tiene foto aparece con la inicial de su nombre.
+
 **Alguien eligió el nombre equivocado.** Abajo de su saludo tiene *Elegir otro nombre*.
 
 **Alguien se agregó dos veces o con el nombre mal escrito.** Corrígelo o bórralo en
@@ -71,7 +76,8 @@ la hoja *Participantes*. Si borras a alguien, sus opciones se quedan en la hoja
 *Deseos* pero ya no se muestran.
 
 **¿Dónde quedan las fotos?** En la carpeta *Intercambio - fotos*, junto a tu hoja en
-Drive. Cuando alguien cambia o borra una foto, la vieja se va a la papelera.
+Drive (las de las personas se llaman *Foto de ...*). Cuando alguien cambia o borra
+una foto, la vieja se va a la papelera.
 
 **¿Quién puede ver la información?** Cualquiera que tenga el link. La página no
 aparece en buscadores. En GitHub solo está el código: los nombres, las opciones y

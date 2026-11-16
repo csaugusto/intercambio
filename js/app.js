@@ -21,7 +21,9 @@
   var SUFIJO = MODO_DEMO ? '.demo' : '';
   var LS_YO = 'intercambio.yo' + SUFIJO;
   var LS_CACHE = 'intercambio.cache' + SUFIJO;
+  var LS_AVATAR = 'intercambio.avatar' + SUFIJO + '.';
   var FOTO_MAX_LADO = 1400;
+  var AVATAR_LADO = 360;
 
   var app = document.getElementById('app');
 
@@ -32,6 +34,9 @@
     sinConexion: false,
     fotos: new Map(),       // fotoId -> Promise<dataURL>
     fotosListas: new Map(), // fotoId -> dataURL ya descargada
+    avatares: new Map(),    // fotoId -> dataURL de la foto de una persona
+    pidiendoAvatares: {},
+    fotoPara: '',           // persona a la que se le está poniendo foto
     borrando: null,
     formulario: null
   };
@@ -161,6 +166,28 @@
         return 'data:' + r.tipo + ';base64,' + r.datos;
       });
     },
+    fotos: function (ids) {
+      if (MODO_DEMO) return demo.fotos(ids);
+      var lotes = [];
+      for (var i = 0; i < ids.length; i += 40) lotes.push(ids.slice(i, i + 40));
+      return Promise.all(lotes.map(function (lote) {
+        return pedirGet({ accion: 'fotos', ids: lote.join(',') });
+      })).then(function (respuestas) {
+        var urls = {};
+        respuestas.forEach(function (r) {
+          Object.keys(r.fotos || {}).forEach(function (id) {
+            urls[id] = 'data:' + r.fotos[id].tipo + ';base64,' + r.fotos[id].datos;
+          });
+        });
+        return urls;
+      });
+    },
+    fotoPersona: function (personaId, dataUrl) {
+      var cuerpo = { accion: 'fotoPersona', persona: personaId };
+      if (dataUrl) cuerpo.foto = { tipo: 'image/jpeg', datos: dataUrl.split(',')[1] };
+      else cuerpo.quitar = true;
+      return MODO_DEMO ? demo.fotoPersona(cuerpo) : pedirPost(cuerpo);
+    },
     registrar: function (nombre) {
       var cuerpo = { accion: 'registrar', nombre: nombre };
       return MODO_DEMO ? demo.registrar(cuerpo) : pedirPost(cuerpo);
@@ -196,6 +223,124 @@
   }
 
   /* ---------------------------------------------------------------- */
+  /* Fotos de las personas (se guardan en el celular para no volver a   */
+  /* pedirlas: cuando alguien cambia su foto, cambia su id)             */
+  /* ---------------------------------------------------------------- */
+
+  function inicial(nombre) {
+    var partes = String(nombre || '?').trim().split(/\s+/);
+    return partes[partes.length - 1].charAt(0).toUpperCase();
+  }
+
+  function avatarListo(id) {
+    if (!id) return '';
+    if (estado.avatares.has(id)) return estado.avatares.get(id);
+    var guardado = almacen.leer(LS_AVATAR + id);
+    if (guardado) estado.avatares.set(id, guardado);
+    return guardado || '';
+  }
+
+  function guardarAvatar(id, url) {
+    estado.avatares.set(id, url);
+    almacen.guardar(LS_AVATAR + id, url);
+  }
+
+  function avatar(p, clase) {
+    var url = avatarListo(p.foto);
+    return '<span class="avatar' + (clase ? ' ' + clase : '') + '"' +
+      (p.foto && !url ? ' data-avatar-id="' + esc(p.foto) + '"' : '') + ' aria-hidden="true">' +
+      (url ? '<img src="' + url + '" alt="">' : '<span>' + esc(inicial(p.nombre)) + '</span>') +
+      '</span>';
+  }
+
+  function cargarAvatares() {
+    var ids = [];
+    $$('[data-avatar-id]').forEach(function (el) {
+      var id = el.getAttribute('data-avatar-id');
+      if (ids.indexOf(id) < 0 && !estado.pidiendoAvatares[id]) ids.push(id);
+    });
+    if (!ids.length) return;
+    ids.forEach(function (id) { estado.pidiendoAvatares[id] = true; });
+    var terminar = function () { ids.forEach(function (id) { delete estado.pidiendoAvatares[id]; }); };
+    api.fotos(ids).then(function (urls) {
+      Object.keys(urls).forEach(function (id) { guardarAvatar(id, urls[id]); });
+      terminar();
+      $$('[data-avatar-id]').forEach(function (el) {
+        var url = avatarListo(el.getAttribute('data-avatar-id'));
+        if (!url) return;
+        el.innerHTML = '<img src="' + url + '" alt="">';
+        el.removeAttribute('data-avatar-id');
+      });
+    }, terminar);
+  }
+
+  /** Borra del celular las fotos de personas que ya no se usan. */
+  function limpiarAvataresViejos() {
+    try {
+      var usadas = {};
+      estado.datos.personas.forEach(function (p) { if (p.foto) usadas[LS_AVATAR + p.foto] = true; });
+      for (var i = localStorage.length - 1; i >= 0; i--) {
+        var k = localStorage.key(i);
+        if (k && k.indexOf(LS_AVATAR) === 0 && !usadas[k]) localStorage.removeItem(k);
+      }
+    } catch (e) { /* sin almacenamiento */ }
+  }
+
+  function elegirFotoPersona(id) {
+    estado.fotoPara = id;
+    $('#archivo-persona').click();
+  }
+
+  function alElegirFotoPersona(ev) {
+    var archivo = ev.target.files && ev.target.files[0];
+    ev.target.value = '';
+    var id = estado.fotoPara;
+    if (!archivo || !id) return;
+    mostrarOcupado('Guardando la foto...');
+    prepararFoto(archivo, { lado: AVATAR_LADO, cuadrada: true }).then(function (dataUrl) {
+      return api.fotoPersona(id, dataUrl).then(function (r) {
+        guardarAvatar(r.foto, dataUrl);
+        var p = persona(id);
+        if (p) p.foto = r.foto;
+        guardarCache();
+        ocultarOcupado();
+        pintar({ desdeRecarga: true });
+        avisar('Listo, se guardó la foto.');
+        cargar();
+      });
+    }).catch(function (err) {
+      ocultarOcupado();
+      avisar(err.message || 'No se pudo guardar la foto. Intenta otra vez.', true);
+    });
+  }
+
+  function quitarFotoPersona(id) {
+    var p = persona(id);
+    if (!p || !window.confirm('¿Quitar la foto de ' + p.nombre + '?')) return;
+    mostrarOcupado('Quitando la foto...');
+    api.fotoPersona(id, null).then(function () {
+      p.foto = '';
+      guardarCache();
+      ocultarOcupado();
+      pintar({ desdeRecarga: true });
+      avisar('Se quitó la foto.');
+      cargar();
+    }, function (err) {
+      ocultarOcupado();
+      avisar(err.message || 'No se pudo quitar la foto. Intenta otra vez.', true);
+    });
+  }
+
+  function botonesFoto(p, esYo) {
+    if (!p.foto) {
+      return '<button type="button" class="boton boton-chico" data-accion="foto-persona" data-id="' + esc(p.id) + '">' +
+        ICONOS.camara + (esYo ? 'Poner mi foto' : 'Poner su foto') + '</button>';
+    }
+    return '<button type="button" class="enlace" data-accion="foto-persona" data-id="' + esc(p.id) + '">' +
+      (esYo ? 'Cambiar mi foto' : 'Cambiar foto') + '</button>';
+  }
+
+  /* ---------------------------------------------------------------- */
   /* Arranque y carga de datos                                         */
   /* ---------------------------------------------------------------- */
 
@@ -204,6 +349,7 @@
     estado.yoId = almacen.leer(LS_YO) || '';
 
     document.addEventListener('click', alHacerClic);
+    $('#archivo-persona').addEventListener('change', alElegirFotoPersona);
     window.addEventListener('hashchange', function () { pintar(); });
     document.addEventListener('visibilitychange', function () {
       if (!document.hidden && estado.datos && Date.now() - estado.ultimaCarga > 60000) cargar();
@@ -225,6 +371,7 @@
       estado.ultimaCarga = Date.now();
       estado.sinConexion = false;
       guardarCache();
+      limpiarAvataresViejos();
       pintar({ desdeRecarga: true });
     }, function (err) {
       if (estado.datos) {
@@ -310,6 +457,7 @@
     if (preguntar) prepararRegistro();
     else if (ruta.vista === 'formulario') prepararFormulario(ruta.id);
     cargarFotosVisibles();
+    cargarAvatares();
 
     if (!desdeRecarga) {
       window.scrollTo(0, 0);
@@ -334,7 +482,13 @@
     var mio = yo();
     var otros = d.personas.filter(function (p) { return p.id !== mio.id; });
 
-    var html = '<h1 class="saludo" tabindex="-1">Hola, ' + esc(mio.nombre) + '</h1>';
+    var html = '' +
+      '<div class="perfil">' + avatar(mio, 'avatar-grande') +
+        '<div class="perfil-texto">' +
+          '<h1 class="saludo" tabindex="-1">Hola, ' + esc(mio.nombre) + '</h1>' +
+          '<div class="perfil-acciones">' + botonesFoto(mio, true) + '</div>' +
+        '</div>' +
+      '</div>';
     html += '<p class="cambiar-persona">¿No eres ' + esc(mio.nombre) + '? ' +
       '<button type="button" class="enlace" data-accion="cambiar-persona">Elegir otro nombre</button></p>';
     html += '<p class="intro">Aquí puedes escribir lo que te gustaría recibir y ver lo que quiere la persona a la que le regalas.</p>';
@@ -358,7 +512,7 @@
       html += '<p class="intro">Toca tu nombre. Solo te lo preguntamos esta vez.</p>' +
         '<div class="tarjeta"><ul class="lista-familia lista-nombres">' + ordenados.map(function (p) {
           return '<li><button type="button" class="persona-fila" data-accion="soy" data-id="' + esc(p.id) + '">' +
-            '<span class="persona-nombre">' + esc(p.nombre) + '</span>' + ICONOS.siguiente + '</button></li>';
+            avatar(p) + '<span class="persona-nombre">' + esc(p.nombre) + '</span>' + ICONOS.siguiente + '</button></li>';
         }).join('') + '</ul></div>';
     } else {
       html += '<p class="intro">Escribe tu nombre para empezar.</p>';
@@ -473,6 +627,7 @@
           var n = p.deseos.length;
           return '' +
             '<li><a class="persona-fila" href="#/persona/' + encodeURIComponent(p.id) + '">' +
+              avatar(p) +
               '<span class="persona-datos">' +
                 '<span class="persona-nombre">' + esc(p.nombre) + '</span>' +
                 '<span class="persona-cuenta' + (n ? '' : ' persona-cuenta-vacia') + '">' +
@@ -493,8 +648,17 @@
     }
     var esYo = p.id === estado.yoId;
     var html = regresar;
-    html += '<p class="sobre-titulo">' + (esYo ? 'Así ven los demás tu lista' : 'Lo que le gustaría a') + '</p>';
-    html += '<h1 tabindex="-1">' + (esYo ? 'Mi lista' : esc(p.nombre)) + '</h1>';
+    html += '' +
+      '<div class="perfil">' + avatar(p, 'avatar-grande') +
+        '<div class="perfil-texto">' +
+          '<p class="sobre-titulo">' + (esYo ? 'Así ven los demás tu lista' : 'Lo que le gustaría a') + '</p>' +
+          '<h1 tabindex="-1">' + (esYo ? 'Mi lista' : esc(p.nombre)) + '</h1>' +
+          '<div class="perfil-acciones">' + botonesFoto(p, esYo) +
+            (p.foto ? '<button type="button" class="enlace enlace-quitar" data-accion="quitar-foto-persona" data-id="' +
+              esc(p.id) + '">Quitar foto</button>' : '') +
+          '</div>' +
+        '</div>' +
+      '</div>';
 
     if (!p.deseos.length) {
       html += '<div class="vacio">' +
@@ -693,23 +857,34 @@
     });
   }
 
-  /** Achica la foto (las de celular pesan mucho) y la convierte a JPG. */
-  function prepararFoto(archivo) {
+  /**
+   * Achica la foto (las de celular pesan mucho) y la convierte a JPG.
+   * Con { cuadrada: true } recorta el centro, para las fotos de las personas.
+   */
+  function prepararFoto(archivo, opciones) {
+    var lado = (opciones && opciones.lado) || FOTO_MAX_LADO;
+    var cuadrada = !!(opciones && opciones.cuadrada);
     return new Promise(function (resolve, reject) {
       var url = URL.createObjectURL(archivo);
       var img = new Image();
       img.onload = function () {
-        var w = img.naturalWidth, h = img.naturalHeight;
-        var escala = Math.min(1, FOTO_MAX_LADO / Math.max(w, h));
-        w = Math.max(1, Math.round(w * escala));
-        h = Math.max(1, Math.round(h * escala));
+        var sw = img.naturalWidth, sh = img.naturalHeight, sx = 0, sy = 0;
+        if (cuadrada) {
+          var m = Math.min(sw, sh);
+          sx = (sw - m) / 2;
+          sy = (sh - m) / 2;
+          sw = sh = m;
+        }
+        var escala = Math.min(1, lado / Math.max(sw, sh));
+        var w = Math.max(1, Math.round(sw * escala));
+        var h = Math.max(1, Math.round(sh * escala));
         var lienzo = document.createElement('canvas');
         lienzo.width = w;
         lienzo.height = h;
         var ctx = lienzo.getContext('2d');
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, w, h);
-        ctx.drawImage(img, 0, 0, w, h);
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
         URL.revokeObjectURL(url);
         resolve(lienzo.toDataURL('image/jpeg', 0.82));
       };
@@ -828,6 +1003,10 @@
       pintarZonaFoto();
     } else if (accion === 'pegar') {
       pegarLink();
+    } else if (accion === 'foto-persona') {
+      elegirFotoPersona(el.getAttribute('data-id'));
+    } else if (accion === 'quitar-foto-persona') {
+      quitarFotoPersona(el.getAttribute('data-id'));
     } else if (accion === 'soy') {
       elegirPersona(el.getAttribute('data-id'));
     } else if (accion === 'cambiar-persona') {
@@ -915,7 +1094,7 @@
   /* ---------------------------------------------------------------- */
 
   var demo = (function () {
-    var LS = 'intercambio.demo.v4';
+    var LS = 'intercambio.demo.v5';
 
     function inicial() {
       return {
@@ -979,6 +1158,27 @@
         var copia = JSON.parse(JSON.stringify(db));
         delete copia.fotos;
         return esperar({ ok: true, config: copia.config, personas: copia.personas });
+      },
+      fotos: function (ids) {
+        var db = leer();
+        var urls = {};
+        ids.forEach(function (id) { if (db.fotos[id]) urls[id] = db.fotos[id]; });
+        return esperar(urls, 250);
+      },
+      fotoPersona: function (cuerpo) {
+        return esperar(null, 500).then(function () {
+          var db = leer();
+          var p = db.personas.filter(function (x) { return x.id === cuerpo.persona; })[0];
+          if (!p) throw new ErrorApi('No se encontró a esa persona. Recarga la página.');
+          if (p.foto) delete db.fotos[p.foto];
+          p.foto = '';
+          if (!cuerpo.quitar) {
+            p.foto = 'fp' + Date.now();
+            db.fotos[p.foto] = 'data:' + cuerpo.foto.tipo + ';base64,' + cuerpo.foto.datos;
+          }
+          escribir(db);
+          return { ok: true, foto: p.foto };
+        });
       },
       registrar: function (cuerpo) {
         return esperar(null, 400).then(function () {
