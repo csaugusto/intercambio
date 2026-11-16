@@ -621,7 +621,7 @@
     var ordenados = otros.slice().sort(function (a, b) { return a.nombre.localeCompare(b.nombre, 'es'); });
     return '' +
       '<section class="tarjeta" aria-labelledby="t-familia">' +
-        '<h2 id="t-familia">¿A quién le regalas?</h2>' +
+        '<h2 id="t-familia">Ver las opciones de los demás</h2>' +
         '<p>Busca su nombre y tócalo para ver lo que le gustaría. Nadie se entera de qué listas ves.</p>' +
         '<ul class="lista-familia">' + ordenados.map(function (p) {
           var n = p.deseos.length;
